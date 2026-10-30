@@ -1,0 +1,14 @@
+# fetched by deps/fetch-deps.sh
+/deps/SDL/
+/deps/libnode/
+/deps/wasmcart-native/
+
+.gradle/
+build/
+/app/.cxx/
+local.properties
+.idea/
+*.iml
+.DS_Store
+*.jks
+*.keystore

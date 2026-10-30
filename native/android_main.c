@@ -1,0 +1,994 @@
+// android_main.c — wasmcart Android player (SDL2 shell over the shared host)
+//
+// An embedding of wasmcart-native's host library: wasmcart-native/src/main.c is
+// the desktop player, wasmcart-libretro/src/libretro.c is the RetroArch core,
+// this runs one cart in the process PlayerActivity starts for it.
+//
+// GL context is OWNED BY SDL (never create EGL here); every cart GL entry
+// point flows through wc_host_set_gl_loader(SDL_GL_GetProcAddress). The GLES3
+// calls in this file are only the app's own 2D blit path.
+//
+// argv (from PlayerActivity): cart path, save file, code cache directory,
+// "cart-size" or "screen-size", controls settings file.
+
+#include "wasmcart_host.h"
+#include "wc_log.h"
+#include "overlay.h"
+
+#include "SDL.h"
+#include "SDL_main.h"
+
+#include <GLES3/gl3.h>
+#include <jni.h>
+#include <math.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define MAX_CONTROLLERS 4
+#define CART_FPS 60.0
+#define STEP_MS (1000.0 / CART_FPS)
+// Catch-up cap per displayed frame. Only the last frame of a batch is seen, so on
+// a cart too heavy for the device a big batch makes things worse: at 5 steps plus
+// audio top-ups one measured 44 cart frames/s and 5 shown. A cart this far behind
+// runs slower instead.
+#define MAX_STEPS 2
+#define AUDIO_TARGET_MS 80   // keep this much queued (romdev playtest pacing)
+#define SAVE_CHECK_FRAMES 600
+
+// Shared-host internals also used by the desktop player (gl_imports.cpp)
+extern void wc_gl_setup_redirect(uint32_t width, uint32_t height);
+extern void wc_gl_blit_to_screen(uint32_t cart_w, uint32_t cart_h, uint32_t win_w, uint32_t win_h);
+extern void wc_gl_set_direct(int on);
+extern void wc_gl_get_blit_size(uint32_t* w, uint32_t* h);
+
+static SDL_GameController* controllers[MAX_CONTROLLERS] = {0};
+
+// ─── Controllers (same shape as desktop main.c) ────────────────────────────
+
+// SDL lists anything with d-pad keys as a joystick, keyboards included, and a
+// device that is not a gamepad must not take a player slot or hide the on-screen
+// controls. Only Android knows the device's real sources: PlayerActivity asks it.
+static bool not_a_gamepad(int device_index) {
+    const char* name = SDL_JoystickNameForIndex(device_index);
+    if (!name) return false;
+    JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
+    jobject activity = (jobject)SDL_AndroidGetActivity();
+    jclass cls = (*env)->GetObjectClass(env, activity);
+    jmethodID method = (*env)->GetMethodID(env, cls, "isNotGamepad", "(Ljava/lang/String;)Z");
+    jstring jname = (*env)->NewStringUTF(env, name);
+    bool result = (*env)->CallBooleanMethod(env, activity, method, jname);
+    (*env)->DeleteLocalRef(env, jname);
+    (*env)->DeleteLocalRef(env, cls);
+    (*env)->DeleteLocalRef(env, activity);
+    return result;
+}
+
+// The on-screen controls show whenever no real gamepad is connected. Java keeps
+// its settings button in step.
+static void overlay_show(bool visible) {
+    overlay_set_visible(visible);
+    JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
+    jobject activity = (jobject)SDL_AndroidGetActivity();
+    jclass cls = (*env)->GetObjectClass(env, activity);
+    jmethodID method = (*env)->GetMethodID(env, cls, "onOverlayVisible", "(Z)V");
+    (*env)->CallVoidMethod(env, activity, method, (jboolean)visible);
+    (*env)->DeleteLocalRef(env, cls);
+    (*env)->DeleteLocalRef(env, activity);
+}
+
+JNIEXPORT void JNICALL
+Java_dev_wasmcart_androidplayer_PlayerActivity_nativeOverlayCommand(JNIEnv* env, jclass cls, jint key, jint value) {
+    overlay_command(key, value);
+}
+
+JNIEXPORT jint JNICALL
+Java_dev_wasmcart_androidplayer_PlayerActivity_nativeOverlayGet(JNIEnv* env, jclass cls, jint key) {
+    return overlay_get(key);
+}
+
+static void open_controller(int device_index) {
+    if (!SDL_IsGameController(device_index)) return;
+    if (not_a_gamepad(device_index)) {
+        wc_log("ignoring %s: not a gamepad\n", SDL_JoystickNameForIndex(device_index));
+        return;
+    }
+    for (int i = 0; i < MAX_CONTROLLERS; i++) {
+        if (!controllers[i]) {
+            controllers[i] = SDL_GameControllerOpen(device_index);
+            if (controllers[i]) {
+                wc_log("controller %d connected: %s\n", i, SDL_GameControllerName(controllers[i]));
+            }
+            return;
+        }
+    }
+}
+
+static bool any_controller(void) {
+    for (int i = 0; i < MAX_CONTROLLERS; i++)
+        if (controllers[i]) return true;
+    return false;
+}
+
+static void close_controller(SDL_JoystickID id) {
+    for (int i = 0; i < MAX_CONTROLLERS; i++) {
+        if (controllers[i] &&
+            SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controllers[i])) == id) {
+            wc_log("controller %d disconnected\n", i);
+            SDL_GameControllerClose(controllers[i]);
+            controllers[i] = NULL;
+            return;
+        }
+    }
+}
+
+// A trigger is 0..WC_TRIGGER_MAX in ABI v4; SDL's own range for a trigger
+// axis is the same, so this only has to fence off a pad reporting below zero.
+static int16_t clamp_trigger(int v) {
+    if (v < 0) return 0;
+    if (v > WC_TRIGGER_MAX) return WC_TRIGGER_MAX;
+    return (int16_t)v;
+}
+
+static void poll_pads(wc_pad_t pads[WC_MAX_PADS]) {
+    memset(pads, 0, sizeof(wc_pad_t) * WC_MAX_PADS);
+    for (int i = 0; i < MAX_CONTROLLERS; i++) {
+        SDL_GameController* gc = controllers[i];
+        if (!gc) continue;
+        pads[i].connected = 1;
+
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_A))            pads[i].buttons |= WC_BUTTON_A;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_B))            pads[i].buttons |= WC_BUTTON_B;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_X))            pads[i].buttons |= WC_BUTTON_X;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_Y))            pads[i].buttons |= WC_BUTTON_Y;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_LEFTSHOULDER)) pads[i].buttons |= WC_BUTTON_L;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER))pads[i].buttons |= WC_BUTTON_R;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_START))        pads[i].buttons |= WC_BUTTON_START;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_BACK))         pads[i].buttons |= WC_BUTTON_SELECT;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_DPAD_UP))      pads[i].buttons |= WC_BUTTON_UP;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_DPAD_DOWN))    pads[i].buttons |= WC_BUTTON_DOWN;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_DPAD_LEFT))    pads[i].buttons |= WC_BUTTON_LEFT;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_DPAD_RIGHT))   pads[i].buttons |= WC_BUTTON_RIGHT;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_LEFTSTICK))    pads[i].buttons |= WC_BUTTON_L3;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_RIGHTSTICK))   pads[i].buttons |= WC_BUTTON_R3;
+        // ABI v4 completes SDL2's controller button set (bits 14-20), matching
+        // the desktop host in wasmcart-native. Without these a cart sees the
+        // guide, share, paddle and touchpad-click buttons on desktop but never
+        // on a phone with the same pad paired.
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_GUIDE))        pads[i].buttons |= WC_BUTTON_GUIDE;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_MISC1))        pads[i].buttons |= WC_BUTTON_MISC1;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_PADDLE1))      pads[i].buttons |= WC_BUTTON_PADDLE1;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_PADDLE2))      pads[i].buttons |= WC_BUTTON_PADDLE2;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_PADDLE3))      pads[i].buttons |= WC_BUTTON_PADDLE3;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_PADDLE4))      pads[i].buttons |= WC_BUTTON_PADDLE4;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_TOUCHPAD))     pads[i].buttons |= WC_BUTTON_TOUCHPAD;
+
+        pads[i].left_x  = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTX);
+        pads[i].left_y  = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTY);
+        pads[i].right_x = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTX);
+        pads[i].right_y = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTY);
+        // ABI v4 triggers are int16 0..32767, the same range SDL reports, so
+        // there is no scaling left to do. The >> 7 that used to be here
+        // existed only to squeeze SDL's range into a uint8.
+        //
+        // Clamped at zero because the ABI promises a cart a non-negative
+        // trigger, and a miscalibrated or oddly-mapped Android pad can report
+        // a slightly negative axis at rest. Under the old uint8 cast that
+        // wrapped to ~255 and read as fully held; passing it through
+        // unclamped would instead hand a cart a negative "0..32767" value.
+        pads[i].left_trigger  = clamp_trigger(
+            SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERLEFT));
+        pads[i].right_trigger = clamp_trigger(
+            SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT));
+    }
+}
+
+// ─── Input-action origins (wasmcart SPEC.md, "Input actions") ───────────────
+// Tell the host what a cart's actions are on: per player, the device used
+// last and the controller family. Player 0 is shared by the touchscreen (the
+// on-screen pad or pointer touches), a mouse and controller 0; players 1-3 are
+// controllers only. No keyboard map: this app drives no pad input from keys.
+
+static int pad_family(SDL_GameController* gc) {
+    // Android's InputDevice vendor id first (SDL reads it from there), then
+    // SDL's own guess for pads that hide behind another vendor's id.
+    switch (SDL_GameControllerGetVendor(gc)) {
+    case 0x045e: return WC_HOST_PAD_XBOX;
+    case 0x054c: return WC_HOST_PAD_PLAYSTATION;
+    case 0x057e: return WC_HOST_PAD_NINTENDO;
+    }
+    switch (SDL_GameControllerGetType(gc)) {
+    case SDL_CONTROLLER_TYPE_XBOX360:
+    case SDL_CONTROLLER_TYPE_XBOXONE: return WC_HOST_PAD_XBOX;
+    case SDL_CONTROLLER_TYPE_PS3:
+    case SDL_CONTROLLER_TYPE_PS4:
+    case SDL_CONTROLLER_TYPE_PS5: return WC_HOST_PAD_PLAYSTATION;
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR: return WC_HOST_PAD_NINTENDO;
+    default: return WC_HOST_PAD_GENERIC;
+    }
+}
+
+static bool pad_in_use(const wc_pad_t* p) {
+    const int dz = 16000;
+    return p->buttons || p->left_x > dz || p->left_x < -dz || p->left_y > dz || p->left_y < -dz ||
+           p->right_x > dz || p->right_x < -dz || p->right_y > dz || p->right_y < -dz ||
+           p->left_trigger > dz || p->right_trigger > dz;
+}
+
+// p0_dev: player 0's last non-pad device (WC_HOST_DEVICE_TOUCH or
+// _KEYBOARD_MOUSE), updated by touch and mouse events; pads before the on-screen
+// pad is merged in. Calls into the host only when a player's answer changes.
+static void update_input_devices(wc_host_t* host, const wc_pad_t pads[WC_MAX_PADS], int* p0_dev) {
+    static int last_dev[WC_MAX_PADS] = { -1, -1, -1, -1 }, last_fam[WC_MAX_PADS];
+    for (int i = 0; i < WC_MAX_PADS; i++) {
+        SDL_GameController* gc = i < MAX_CONTROLLERS ? controllers[i] : NULL;
+        int dev = gc ? WC_HOST_DEVICE_GAMEPAD : WC_HOST_DEVICE_UNKNOWN;
+        if (i == 0) {
+            if (gc && pad_in_use(&pads[0])) *p0_dev = WC_HOST_DEVICE_GAMEPAD;
+            else if (!gc && *p0_dev == WC_HOST_DEVICE_GAMEPAD) *p0_dev = WC_HOST_DEVICE_TOUCH;
+            dev = *p0_dev;
+        }
+        int fam = dev == WC_HOST_DEVICE_GAMEPAD ? pad_family(gc) : 0;
+        if (dev != last_dev[i] || fam != last_fam[i]) {
+            wc_host_input_device(host, i, dev, fam);
+            last_dev[i] = dev;
+            last_fam[i] = fam;
+        }
+    }
+}
+
+// ─── Rumble backend → SDL_GameControllerRumble (InputDevice vibrator) ──────
+
+static int rumble_has(void* user, uint32_t pad_id) {
+    (void)user;
+    return pad_id < MAX_CONTROLLERS && controllers[pad_id] &&
+           SDL_GameControllerHasRumble(controllers[pad_id]);
+}
+static void rumble_go(void* user, uint32_t pad_id, float low, float high, uint32_t ms) {
+    (void)user;
+    if (pad_id < MAX_CONTROLLERS && controllers[pad_id])
+        SDL_GameControllerRumble(controllers[pad_id],
+            (Uint16)(low * 65535.0f), (Uint16)(high * 65535.0f), ms);
+}
+static void rumble_stop(void* user, uint32_t pad_id) {
+    (void)user;
+    if (pad_id < MAX_CONTROLLERS && controllers[pad_id])
+        SDL_GameControllerRumble(controllers[pad_id], 0, 0, 0);
+}
+
+// ─── Letterbox (mirror of letterbox.js fitRect: min scale, centered) ───────
+
+// Held upright, the picture goes at the top and the controls below it. Wider than
+// the picture, it stays centered between the controls.
+typedef struct { float x, y, w, h; } fit_rect_t;
+
+static fit_rect_t fit_rect(uint32_t src_w, uint32_t src_h, int dst_w, int dst_h) {
+    fit_rect_t r = {0, 0, (float)dst_w, (float)dst_h};
+    if (!src_w || !src_h) return r;
+    float scale = fminf((float)dst_w / (float)src_w, (float)dst_h / (float)src_h);
+    r.w = (float)src_w * scale;
+    r.h = (float)src_h * scale;
+    r.x = ((float)dst_w - r.w) * 0.5f;
+    r.y = 0.0f;
+    return r;
+}
+
+// ─── Pointer: touch fingers → slots 1-9, mouse → slot 0 ────────────────────
+//
+// Slot 0 is reserved for mouse by the ABI (SPEC.md pointer section); fingers
+// fill 1+. SDL finger IDs are arbitrary 64-bit values and MUST NOT pass through
+// raw — we keep our own id→slot table. SDL_HINT_TOUCH_MOUSE_EVENTS=0 stops SDL
+// from synthesizing ghost mouse events into slot 0 from touches.
+
+typedef struct {
+    SDL_FingerID id;
+    bool used;
+} finger_slot_t;
+
+static finger_slot_t finger_slots[WC_MAX_POINTERS]; // [0] unused (mouse)
+
+static int finger_slot_find(SDL_FingerID id) {
+    for (int i = 1; i < WC_MAX_POINTERS; i++)
+        if (finger_slots[i].used && finger_slots[i].id == id) return i;
+    return -1;
+}
+
+static int finger_slot_alloc(SDL_FingerID id) {
+    int existing = finger_slot_find(id);
+    if (existing >= 0) return existing;
+    for (int i = 1; i < WC_MAX_POINTERS; i++) {
+        if (!finger_slots[i].used) {
+            finger_slots[i].used = true;
+            finger_slots[i].id = id;
+            return i;
+        }
+    }
+    return -1; // >9 concurrent fingers: drop
+}
+
+static void finger_slot_free(int slot) {
+    if (slot >= 1 && slot < WC_MAX_POINTERS) finger_slots[slot].used = false;
+}
+
+// Window coords → cart coords through the inverse letterbox transform.
+// Touches in the letterbox bars clamp into range.
+static void to_cart_coords(float px, float py, const fit_rect_t* r,
+                           uint32_t cart_w, uint32_t cart_h,
+                           int16_t* cx, int16_t* cy) {
+    float x = (px - r->x) * (float)cart_w / r->w;
+    float y = (py - r->y) * (float)cart_h / r->h;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (cart_w && x > (float)(cart_w - 1)) x = (float)(cart_w - 1);
+    if (cart_h && y > (float)(cart_h - 1)) y = (float)(cart_h - 1);
+    *cx = (int16_t)x;
+    *cy = (int16_t)y;
+}
+
+// ─── Persistent save ────────────────────────────────────────────────────────
+//
+// The path comes from LibraryActivity (saves/<cart name>-<size>.sav). Android
+// kills backgrounded apps without warning, so the write points are:
+// WILLENTERBACKGROUND, TERMINATING, clean quit, and a dirty-check every
+// SAVE_CHECK_FRAMES frames.
+
+static const char* save_path = NULL;
+static uint8_t* save_last = NULL;  // last bytes written to disk
+static uint32_t save_last_size = 0;
+
+static uint8_t* read_file(const char* path, uint32_t* out_size) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size <= 0) { fclose(f); return NULL; }
+    uint8_t* buf = malloc((size_t)size);
+    if (buf && fread(buf, 1, (size_t)size, f) != (size_t)size) { free(buf); buf = NULL; }
+    fclose(f);
+    *out_size = buf ? (uint32_t)size : 0;
+    return buf;
+}
+
+static bool all_zero(const uint8_t* p, uint32_t n) {
+    for (uint32_t i = 0; i < n; i++) if (p[i]) return false;
+    return true;
+}
+
+static void save_persist(wc_host_t* host) {
+    if (!save_path) return;
+    uint32_t size = 0;
+    uint8_t* data = wc_host_get_save_data(host, &size);
+    if (!data || size == 0) return;
+
+    // Never-written cart with an all-zero region: nothing to say yet
+    if (!save_last && all_zero(data, size)) return;
+    if (save_last && save_last_size == size && memcmp(save_last, data, size) == 0) return;
+
+    char tmp[4200];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", save_path);
+    FILE* f = fopen(tmp, "wb");
+    if (!f) { wc_log_err("save: cannot open %s\n", tmp); return; }
+    size_t wrote = fwrite(data, 1, size, f);
+    fclose(f);
+    if (wrote != size || rename(tmp, save_path) != 0) {
+        wc_log_err("save: write failed (%s)\n", save_path);
+        return;
+    }
+
+    if (!save_last || save_last_size != size) {
+        free(save_last);
+        save_last = malloc(size);
+        save_last_size = size;
+    }
+    if (save_last) memcpy(save_last, data, size);
+    wc_log("save: %u bytes -> %s\n", size, save_path);
+}
+
+// ─── 2D framebuffer blit ────────────────────────────────────────────────────
+//
+// The cart framebuffer is XRGB little-endian, i.e. B,G,R,A byte order. Upload
+// as RGBA and swizzle in the shader (.bgra) — no GL_BGRA_EXT dependency, no
+// per-pixel CPU conversion.
+
+static GLuint blit_tex = 0, blit_program = 0, blit_vao = 0;
+static uint32_t blit_tex_w = 0, blit_tex_h = 0;
+
+static GLuint compile_shader(GLenum type, const char* src) {
+    GLuint s = glCreateShader(type);
+    glShaderSource(s, 1, &src, NULL);
+    glCompileShader(s);
+    GLint ok = 0;
+    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[512];
+        glGetShaderInfoLog(s, sizeof(log), NULL, log);
+        wc_log_err("blit shader: %s\n", log);
+    }
+    return s;
+}
+
+static void blit_init(void) {
+    const char* vs_src =
+        "#version 300 es\n"
+        "out vec2 uv;\n"
+        "void main() {\n"
+        "  float x = float((gl_VertexID & 1) << 2) - 1.0;\n"
+        "  float y = float((gl_VertexID & 2) << 1) - 1.0;\n"
+        "  uv = vec2((x + 1.0) * 0.5, 1.0 - (y + 1.0) * 0.5);\n"
+        "  gl_Position = vec4(x, y, 0.0, 1.0);\n"
+        "}\n";
+    const char* fs_src =
+        "#version 300 es\n"
+        "precision mediump float;\n"
+        "in vec2 uv;\n"
+        "out vec4 fragColor;\n"
+        "uniform sampler2D tex;\n"
+        "void main() { fragColor = vec4(texture(tex, uv).bgr, 1.0); }\n";
+
+    GLuint vs = compile_shader(GL_VERTEX_SHADER, vs_src);
+    GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fs_src);
+    blit_program = glCreateProgram();
+    glAttachShader(blit_program, vs);
+    glAttachShader(blit_program, fs);
+    glLinkProgram(blit_program);
+    GLint blit_linked = 0;
+    glGetProgramiv(blit_program, GL_LINK_STATUS, &blit_linked);
+    if (!blit_linked) {
+        char log[512];
+        glGetProgramInfoLog(blit_program, sizeof(log), NULL, log);
+        wc_log_err("blit program link: %s\n", log);
+    }
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    glGenVertexArrays(1, &blit_vao);
+    glGenTextures(1, &blit_tex);
+    glBindTexture(GL_TEXTURE_2D, blit_tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
+static void blit_2d_frame(const uint8_t* fb, uint32_t w, uint32_t h,
+                          int win_w, int win_h) {
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_BLEND);
+    glViewport(0, 0, win_w, win_h);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, blit_tex);
+    if (w != blit_tex_w || h != blit_tex_h) {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, fb);
+        blit_tex_w = w;
+        blit_tex_h = h;
+    } else {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, fb);
+    }
+
+    fit_rect_t r = fit_rect(w, h, win_w, win_h);
+    // GL viewport origin is bottom-left; fit_rect is top-left based
+    glViewport((GLint)r.x, (GLint)((float)win_h - r.y - r.h), (GLsizei)r.w, (GLsizei)r.h);
+    glUseProgram(blit_program);
+    glBindVertexArray(blit_vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+}
+
+// ─── Main ───────────────────────────────────────────────────────────────────
+
+int main(int argc, char* argv[]) {
+    if (argc < 6) {
+        wc_log_err("expected cart, save, code cache, size and controls arguments\n");
+        return 1;
+    }
+    const char* cart_path = argv[1];
+    save_path = argv[2];
+    const char* code_cache_dir = argv[3];
+    bool offer_screen_size = strcmp(argv[4], "screen-size") == 0;
+    const char* controls_path = argv[5];
+
+    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0"); // no ghost mouse from touch
+    SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0"); // no ghost touch from mouse
+    // The on-screen pad shows unless a real gamepad is connected, and SDL
+    // otherwise lists the phone's accelerometer as a joystick.
+    SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "0");
+    // No SDL_HINT_ORIENTATIONS: a RESIZABLE window with none follows the device
+    // and obeys its auto-rotate lock, and the player works both ways up.
+
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0) {
+        wc_log_err("SDL_Init failed: %s\n", SDL_GetError());
+        return 1;
+    }
+
+    // Extra mappings on top of SDL's Android defaults
+    {
+        #include "gamecontrollerdb.h"
+        int count = 0;
+        for (const char** p = _gamecontrollerdb_lines; *p; p++) {
+            if (SDL_GameControllerAddMapping(*p) >= 0) count++;
+        }
+        wc_log("loaded %d controller mappings\n", count);
+    }
+
+    // GLES 3.0 context, owned by SDL. The window surface gets depth24/s8 so a
+    // GL cart can draw straight onto it (direct present: no full-screen copy
+    // per frame, which on a phone is ~10 MB of memory traffic a frame). When
+    // the cart cannot (its size differs from the screen's), it renders into
+    // the redirect FBO, which carries its own depth24/s8, as before.
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+
+    SDL_Window* window = SDL_CreateWindow("wasmcart",
+        SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+        0, 0, SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_RESIZABLE);
+    if (!window) {
+        wc_log_err("SDL_CreateWindow failed: %s\n", SDL_GetError());
+        return 1;
+    }
+    SDL_GLContext gl = SDL_GL_CreateContext(window);
+    if (!gl) {
+        wc_log_err("SDL_GL_CreateContext failed: %s\n", SDL_GetError());
+        return 1;
+    }
+    SDL_GL_SetSwapInterval(1);
+
+    int win_w = 0, win_h = 0;
+    SDL_GL_GetDrawableSize(window, &win_w, &win_h);
+    // What the surface really got: direct present needs both
+    int surf_depth = 0, surf_stencil = 0;
+    SDL_GL_GetAttribute(SDL_GL_DEPTH_SIZE, &surf_depth);
+    SDL_GL_GetAttribute(SDL_GL_STENCIL_SIZE, &surf_stencil);
+    bool surface_direct_ok = surf_depth >= 16 && surf_stencil >= 8;
+    wc_log("window surface depth %d stencil %d (direct present %s)\n", surf_depth, surf_stencil,
+           surface_direct_ok ? "available" : "off");
+    wc_log("display %dx%d, GL: %s\n", win_w, win_h, (const char*)glGetString(GL_VERSION));
+
+    // Host
+    wc_host_t* host = wc_host_create();
+    if (!host) {
+        wc_log_err("wc_host_create failed\n");
+        return 1;
+    }
+    wc_host_set_gl_loader(host, (wc_gl_get_proc_fn)SDL_GL_GetProcAddress);
+
+    wc_rumble_backend_t rumble = { rumble_has, rumble_go, rumble_stop, NULL };
+    wc_host_set_rumble_backend(host, &rumble);
+
+    // Prior save must be in memory before wc_init reads it
+    uint32_t boot_save_size = 0;
+    uint8_t* boot_save = read_file(save_path, &boot_save_size);
+    if (boot_save) {
+        wc_log("save: restored %u bytes from %s\n", boot_save_size, save_path);
+        save_last = malloc(boot_save_size);
+        if (save_last) { memcpy(save_last, boot_save, boot_save_size); save_last_size = boot_save_size; }
+    }
+
+    wc_host_options_t opts = {
+        // A size the author declared is the cart's call: 0 has the host offer it,
+        // as the desktop player does. Offered the screen instead, an engine that
+        // lays out from the preference draws for the screen while the host shows
+        // only the declared area, cut off at the edge.
+        // Always offered wide, whichever way up the phone is: the game goes above
+        // the controls when held upright, and can be rotated mid-game.
+        .preferred_width = offer_screen_size ? (uint32_t)(win_w > win_h ? win_w : win_h) : 0,
+        .preferred_height = offer_screen_size ? (uint32_t)(win_w > win_h ? win_h : win_w) : 0,
+        .host_fps = (uint32_t)CART_FPS,
+        .audio_sample_rate = 48000,
+        .save_data = boot_save,
+        .save_data_size = boot_save_size,
+        .code_cache_dir = code_cache_dir,
+    };
+    int rc = wc_host_load_file(host, cart_path, &opts);
+    free(boot_save);
+    if (rc != 0) {
+        // A cart that won't run says why before the player drops back to the
+        // library: this host has no WebGPU, and carts older than ABI 4 are refused.
+        const char* reason = wc_host_wgpu_unavailable_reason(host);
+        char msg[1024];
+        snprintf(msg, sizeof(msg), "This cart could not be loaded.\n\n%s",
+                 reason && reason[0] ? reason
+                                     : "It may be damaged, or built for an older wasmcart ABI (this player needs ABI 4).");
+        wc_log_err("failed to load %s: %s\n", cart_path, msg);
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "wasmcart", msg, window);
+        wc_host_destroy(host);
+        return 1;
+    }
+
+    const wc_cart_info_t* info = wc_host_get_cart_info(host);
+    const wc_manifest_t* manifest = wc_host_get_manifest(host);
+    bool is_gl = wc_host_uses_gl(host);
+    uint32_t cart_w = info->width;
+    uint32_t cart_h = info->height;
+
+    // Redirect FBO at the real render resolution (desktop main.c pattern), wide
+    // whichever way up the phone is, like the size the cart was offered: an engine
+    // that derives its projection from the framebuffer draws nothing visible into
+    // one taller than it expects.
+    uint32_t screen_long = (uint32_t)(win_w > win_h ? win_w : win_h);
+    uint32_t screen_short = (uint32_t)(win_w > win_h ? win_h : win_w);
+    uint32_t redir_w = cart_w > screen_long ? cart_w : screen_long;
+    uint32_t redir_h = cart_h > screen_short ? cart_h : screen_short;
+    if (is_gl) {
+        wc_gl_setup_redirect(redir_w, redir_h);
+    } else {
+        blit_init();
+    }
+
+    // On-screen gamepad, for every cart, whenever no real gamepad is connected.
+    // Which controls appear comes from the manifest `controls` hint unless the
+    // player chose otherwise; a cart that wants the whole touchscreen declares none.
+    bool cart_takes_touch = (info->flags & WC_FLAG_POINTER) != 0;
+    {
+        float ddpi = 0.0f;
+        if (SDL_GetDisplayDPI(0, &ddpi, NULL, NULL) != 0 || ddpi <= 0.0f)
+            ddpi = 420.0f; // typical 1080p-class panel
+        uint32_t mask = manifest->controls_set ? manifest->controls : OVERLAY_FULL_PAD;
+        overlay_init(mask, ddpi / 25.4f, controls_path);
+        fit_rect_t gr = fit_rect(cart_w, cart_h, win_w, win_h);
+        overlay_layout(win_w, win_h, gr.x, gr.y, gr.w, gr.h);
+        wc_log("overlay: mask %03x (%s), dpi %.0f\n", mask,
+               manifest->controls_set ? "manifest" : "full pad", ddpi);
+    }
+
+    // Audio
+    SDL_AudioDeviceID audio_dev = 0;
+    bool audio_f32 = (info->flags & WC_FLAG_AUDIO_F32) != 0;
+    uint32_t audio_rate = info->audio_sample_rate ? info->audio_sample_rate : 48000;
+    uint32_t audio_bytes_per_frame = audio_f32 ? 8 : 4; // stereo
+    if (info->audio_ptr && info->audio_cap) {
+        SDL_AudioSpec want = {0}, have;
+        want.freq = (int)audio_rate;
+        want.format = audio_f32 ? AUDIO_F32 : AUDIO_S16;
+        want.channels = 2;
+        want.samples = 1024;
+        audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+        if (audio_dev) {
+            uint32_t seed_bytes = (uint32_t)have.freq / 20 * audio_bytes_per_frame; // 50ms
+            uint8_t* silence = calloc(1, seed_bytes);
+            SDL_QueueAudio(audio_dev, silence, seed_bytes);
+            free(silence);
+            SDL_PauseAudioDevice(audio_dev, 0);
+            wc_log("audio %dHz %s stereo\n", have.freq, audio_f32 ? "F32" : "S16");
+        }
+    }
+    uint32_t audio_target_bytes = audio_rate * AUDIO_TARGET_MS / 1000 * audio_bytes_per_frame;
+
+    for (int i = 0; i < SDL_NumJoysticks(); i++) open_controller(i);
+    overlay_show(!any_controller());
+
+    wc_log("running %s (%ux%u, %s)\n", manifest->name, cart_w, cart_h, is_gl ? "GL" : "2D");
+
+    // ── Main loop ──
+    wc_host_enter_v8();
+
+    bool running = true;
+    // Player 0 starts on the pad when one is paired, else on the touchscreen
+    int p0_dev = controllers[0] ? WC_HOST_DEVICE_GAMEPAD : WC_HOST_DEVICE_TOUCH;
+    bool text_started = false;
+    bool audio_seen = false;
+    bool suspended = false;
+    bool was_editing = false;
+    int edit_settle = 0;
+    uint32_t frame_count = 0;
+    double time_ms = 0.0;       // cart clock: advances only when frames run
+    double acc_ms = 0.0;
+    uint64_t last_ticks = SDL_GetTicks64();
+    wc_pad_t pads[WC_MAX_PADS];
+
+    while (running) {
+        // Mirror cart text-input state → raises/dismisses the soft keyboard
+        {
+            bool want = wc_host_text_input_active(host) != 0;
+            if (want != text_started) {
+                if (want) SDL_StartTextInput(); else SDL_StopTextInput();
+                text_started = want;
+            }
+        }
+
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            switch (ev.type) {
+                case SDL_QUIT:
+                    save_persist(host);
+                    running = false;
+                    break;
+
+                case SDL_APP_WILLENTERBACKGROUND:
+                case SDL_APP_TERMINATING:
+                    // Android kills backgrounded apps without warning: this is
+                    // the last reliable write point (SPEC.md lifecycle notes).
+                    save_persist(host);
+                    suspended = true;
+                    if (audio_dev) SDL_PauseAudioDevice(audio_dev, 1);
+                    break;
+
+                case SDL_APP_DIDENTERFOREGROUND:
+                    suspended = false;
+                    if (audio_dev) SDL_PauseAudioDevice(audio_dev, 0);
+                    // Absorb the time spent away instead of fast-forwarding
+                    last_ticks = SDL_GetTicks64();
+                    acc_ms = 0.0;
+                    break;
+
+                case SDL_TEXTINPUT:
+                    wc_host_push_text(host, ev.text.text, (uint32_t)strlen(ev.text.text));
+                    break;
+
+                case SDL_CONTROLLERDEVICEADDED:
+                    open_controller(ev.cdevice.which);
+                    overlay_show(!any_controller());
+                    break;
+                case SDL_CONTROLLERDEVICEREMOVED:
+                    close_controller(ev.cdevice.which);
+                    overlay_show(!any_controller());
+                    break;
+
+                case SDL_KEYDOWN:
+                    if (ev.key.keysym.sym == SDLK_AC_BACK) {
+                        save_persist(host);
+                        running = false;
+                    }
+                    break;
+
+                // Touch → a control on the overlay, else pointer slots 1-9
+                case SDL_FINGERDOWN:
+                case SDL_FINGERMOTION:
+                case SDL_FINGERUP: {
+                    p0_dev = WC_HOST_DEVICE_TOUCH;
+                    if (overlay_event(&ev, win_w, win_h, (double)SDL_GetTicks64())) break;
+                    if (!cart_takes_touch) break;
+                    int slot = (ev.type == SDL_FINGERDOWN)
+                        ? finger_slot_alloc(ev.tfinger.fingerId)
+                        : finger_slot_find(ev.tfinger.fingerId);
+                    if (slot < 0) break;
+                    const wc_cart_info_t* ci = wc_host_get_cart_info(host);
+                    fit_rect_t r = fit_rect(ci->width, ci->height, win_w, win_h);
+                    int16_t cx, cy;
+                    to_cart_coords(ev.tfinger.x * (float)win_w,
+                                   ev.tfinger.y * (float)win_h,
+                                   &r, ci->width, ci->height, &cx, &cy);
+                    if (ev.type == SDL_FINGERUP) {
+                        wc_host_set_pointer(host, slot, cx, cy, 0, 0);
+                        finger_slot_free(slot);
+                    } else {
+                        wc_host_set_pointer(host, slot, cx, cy, 0x01, 1);
+                    }
+                    break;
+                }
+
+                // Real mice (touch synthesis disabled above) → slot 0
+                case SDL_MOUSEMOTION:
+                case SDL_MOUSEBUTTONDOWN:
+                case SDL_MOUSEBUTTONUP: {
+                    if (ev.type != SDL_MOUSEMOTION && ev.button.which == SDL_TOUCH_MOUSEID) break;
+                    p0_dev = WC_HOST_DEVICE_KEYBOARD_MOUSE;
+                    int mx, my;
+                    uint32_t state = SDL_GetMouseState(&mx, &my);
+                    uint8_t buttons = 0;
+                    if (state & SDL_BUTTON_LMASK) buttons |= 0x01;
+                    if (state & SDL_BUTTON_RMASK) buttons |= 0x02;
+                    if (state & SDL_BUTTON_MMASK) buttons |= 0x04;
+                    const wc_cart_info_t* ci = wc_host_get_cart_info(host);
+                    fit_rect_t r = fit_rect(ci->width, ci->height, win_w, win_h);
+                    int16_t cx, cy;
+                    to_cart_coords((float)mx, (float)my, &r, ci->width, ci->height, &cx, &cy);
+                    wc_host_set_pointer(host, 0, cx, cy, buttons, 1);
+                    break;
+                }
+
+                case SDL_MOUSEWHEEL:
+                    wc_host_add_wheel(host, (int32_t)(ev.wheel.preciseX * WC_WHEEL_DELTA),
+                                      (int32_t)(ev.wheel.preciseY * WC_WHEEL_DELTA));
+                    break;
+
+                case SDL_WINDOWEVENT:
+                    if (ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                        SDL_GL_GetDrawableSize(window, &win_w, &win_h);
+                        const wc_cart_info_t* ci = wc_host_get_cart_info(host);
+                        fit_rect_t gr = fit_rect(ci->width, ci->height, win_w, win_h);
+                        overlay_layout(win_w, win_h, gr.x, gr.y, gr.w, gr.h);
+                    }
+                    break;
+            }
+        }
+        if (!running) break;
+
+        uint64_t now = SDL_GetTicks64();
+        double real_delta = (double)(now - last_ticks);
+        last_ticks = now;
+        if (real_delta > 250.0) real_delta = 250.0; // resume/hiccup clamp (SPEC)
+
+        if (suspended) {
+            // While suspended: do not call wc_render. SDL usually blocks in
+            // PollEvent on pause anyway; this covers the non-blocking window.
+            SDL_Delay(50);
+            continue;
+        }
+
+        acc_ms += real_delta;
+
+        // The controls editor pauses the cart. It runs one more frame first:
+        // direct present is off from here on, so that frame lands in the redirect
+        // and the frozen picture can be drawn again for as long as the editor is up.
+        overlay_pump();
+        bool editing = overlay_editing();
+        if (editing != was_editing) {
+            was_editing = editing;
+            edit_settle = editing ? 1 : 0;
+            if (audio_dev) SDL_PauseAudioDevice(audio_dev, editing ? 1 : 0);
+            acc_ms = 0.0;
+        }
+
+        poll_pads(pads);
+        update_input_devices(host, pads, &p0_dev);
+        overlay_apply(&pads[0]);
+        wc_host_set_pads(host, pads);
+
+        // DIRECT PRESENT: when the cart renders at exactly the screen's size
+        // (a cart that takes the host's preferred size, which here is the
+        // screen) and its own blit agrees, it draws straight onto the surface
+        // and the present copy is skipped. A fixed-size cart smaller than the
+        // screen, or a rotation, keeps the redirect and its scaling blit.
+        if (is_gl) {
+            uint32_t bw = 0, bh = 0;
+            wc_gl_get_blit_size(&bw, &bh);
+            bool blit_ok = (!bw && !bh) || (bw == cart_w && bh == cart_h);
+            bool direct = !editing && surface_direct_ok && blit_ok && cart_w == (uint32_t)win_w && cart_h == (uint32_t)win_h &&
+                          redir_w == (uint32_t)win_w && redir_h == (uint32_t)win_h;
+            static int last_direct = -1;
+            if ((int)direct != last_direct) {
+                wc_log("present: %s (cart %ux%u, redirect %ux%u, surface %dx%d, cart blit %ux%u)\n",
+                       direct ? "direct" : "redirect", cart_w, cart_h, redir_w, redir_h, win_w, win_h, bw, bh);
+                last_direct = direct;
+            }
+            wc_gl_set_direct(direct);
+        }
+
+        // Fixed-step with catch-up: wall clock paces, audio queue refines.
+        int steps = 0;
+        if (editing) {
+            if (edit_settle > 0) {
+                edit_settle--;
+                wc_host_run_frame(host);
+            }
+            acc_ms = 0.0;
+        }
+        while (!editing && acc_ms >= STEP_MS && steps < MAX_STEPS && running) {
+            time_ms += STEP_MS;
+            wc_host_set_time(host, time_ms, STEP_MS, frame_count);
+            wc_host_run_frame(host);
+            frame_count++;
+            steps++;
+            acc_ms -= STEP_MS;
+
+            if (audio_dev) {
+                uint32_t n;
+                bool f32;
+                const void* audio = wc_host_get_audio(host, &n, &f32);
+                if (n > 0) {
+                    SDL_QueueAudio(audio_dev, audio, n * (f32 ? 8 : 4));
+                    audio_seen = true;
+                }
+            }
+            if (wc_host_has_trapped(host)) {
+                wc_log_err("cart trapped at frame %u\n", frame_count);
+                save_persist(host);
+                running = false;
+            }
+        }
+        if (steps == MAX_STEPS) acc_ms = 0.0; // dropped time, don't spiral
+
+        // Audio-paced top-up: keep ~AUDIO_TARGET_MS queued so the device never
+        // underruns (the anti-choppiness rule from romdev playtest pacing).
+        int extra = 0;
+        while (running && !editing && audio_dev && audio_seen && extra < 1 &&
+               SDL_GetQueuedAudioSize(audio_dev) < audio_target_bytes) {
+            time_ms += STEP_MS;
+            wc_host_set_time(host, time_ms, STEP_MS, frame_count);
+            wc_host_run_frame(host);
+            frame_count++;
+            extra++;
+            uint32_t n;
+            bool f32;
+            const void* audio = wc_host_get_audio(host, &n, &f32);
+            if (n > 0) SDL_QueueAudio(audio_dev, audio, n * (f32 ? 8 : 4));
+            else break; // cart went quiet; don't spin
+            if (wc_host_has_trapped(host)) {
+                wc_log_err("cart trapped at frame %u\n", frame_count);
+                save_persist(host);
+                running = false;
+            }
+        }
+
+        // First frame: cart may have resized (Godot reads host_info and
+        // reconfigures) — grow the redirect FBO to match.
+        if (frame_count > 0 && frame_count <= (uint32_t)MAX_STEPS && is_gl) {
+            const wc_cart_info_t* ni = wc_host_get_cart_info(host);
+            if (ni->width != cart_w || ni->height != cart_h) {
+                cart_w = ni->width;
+                cart_h = ni->height;
+                redir_w = cart_w > screen_long ? cart_w : screen_long;
+                redir_h = cart_h > screen_short ? cart_h : screen_short;
+                wc_gl_setup_redirect(redir_w, redir_h);
+                wc_log("redirect FBO resized to %ux%u (cart %ux%u)\n",
+                       redir_w, redir_h, cart_w, cart_h);
+                fit_rect_t gr = fit_rect(cart_w, cart_h, win_w, win_h);
+                overlay_layout(win_w, win_h, gr.x, gr.y, gr.w, gr.h);
+            }
+        }
+
+        // Present
+        if (is_gl) {
+            /* the cart's area of the redirect (it renders at its own size,
+             * from the bottom-left), scaled to fit, as the desktop player
+             * does; the whole redirect was right only when it was cart-sized */
+            // The host centers the picture in the height it is given, in absolute
+            // surface coordinates: this height centers it flush with the top.
+            uint32_t bw = 0, bh = 0;
+            wc_gl_get_blit_size(&bw, &bh);
+            fit_rect_t gr = fit_rect(bw ? bw : cart_w, bh ? bh : cart_h, win_w, win_h);
+            uint32_t blit_h = (uint32_t)(2.0f * (float)win_h - gr.h);
+            wc_gl_blit_to_screen(cart_w, cart_h, (uint32_t)win_w, blit_h);
+        } else {
+            uint32_t w, h;
+            const uint8_t* fb = wc_host_get_framebuffer(host, &w, &h);
+            if (fb && w > 0 && h > 0) blit_2d_frame(fb, w, h, win_w, win_h);
+        }
+        overlay_render(is_gl, (double)now);
+        SDL_GL_SwapWindow(window); // vsync paces the loop
+
+        // adb logcat -s wasmcart: how a cart really runs on this device
+        {
+            static uint64_t perf_at = 0;
+            static uint32_t perf_presents = 0, perf_frames = 0;
+            perf_presents++;
+            uint64_t t = SDL_GetTicks64();
+            if (!perf_at) { perf_at = t; perf_frames = frame_count; }
+            if (t - perf_at >= 5000) {
+                wc_log("perf: %.1f presents/s, %.1f cart frames/s\n",
+                       perf_presents * 1000.0 / (double)(t - perf_at),
+                       (frame_count - perf_frames) * 1000.0 / (double)(t - perf_at));
+                perf_at = t;
+                perf_presents = 0;
+                perf_frames = frame_count;
+            }
+        }
+
+        if (frame_count % SAVE_CHECK_FRAMES == 0) save_persist(host);
+    }
+
+    save_persist(host);
+
+    // A cart that died says so instead of dropping silently back to the library
+    if (wc_host_has_trapped(host)) {
+        const char* reason = wc_host_trap_reason(host);
+        char msg[1024];
+        snprintf(msg, sizeof(msg), "The cart stopped.\n\n%s", reason ? reason : "It hit a runtime error.");
+        if (audio_dev) SDL_PauseAudioDevice(audio_dev, 1);
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "wasmcart", msg, window);
+    }
+
+    wc_host_exit_v8();
+    wc_log("shutting down\n");
+
+    overlay_shutdown();
+    if (audio_dev) SDL_CloseAudioDevice(audio_dev);
+    for (int i = 0; i < MAX_CONTROLLERS; i++)
+        if (controllers[i]) SDL_GameControllerClose(controllers[i]);
+    wc_host_destroy(host);
+    SDL_GL_DeleteContext(gl);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return 0;
+}

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A game cartridge, inside the adaptive icon's center safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#E8ECF4"
+        android:pathData="M36,32 L72,32 L72,76 L66,76 L66,72 L42,72 L42,76 L36,76 Z" />
+    <path
+        android:fillColor="#654FF0"
+        android:pathData="M42,38 L66,38 L66,62 L42,62 Z" />
+    <path
+        android:fillColor="#E8ECF4"
+        android:pathData="M48,44 L60,44 L60,56 L48,56 Z" />
+</vector>

@@ -9,7 +9,8 @@
 // calls in this file are only the app's own 2D blit path.
 //
 // argv (from PlayerActivity): cart path, save file, code cache directory,
-// "cart-size" or "screen-size", controls settings file.
+// "screen-size" or the cart's declared "WxH", controls settings file, the
+// tallest picture to offer the cart ("0" for no limit).
 
 #include "wasmcart_host.h"
 #include "wc_log.h"
@@ -490,15 +491,17 @@ static void blit_2d_frame(const uint8_t* fb, uint32_t w, uint32_t h,
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 int main(int argc, char* argv[]) {
-    if (argc < 6) {
-        wc_log_err("expected cart, save, code cache, size and controls arguments\n");
+    if (argc < 7) {
+        wc_log_err("expected cart, save, code cache, size, controls and max height arguments\n");
         return 1;
     }
     const char* cart_path = argv[1];
     save_path = argv[2];
     const char* code_cache_dir = argv[3];
-    bool offer_screen_size = strcmp(argv[4], "screen-size") == 0;
+    unsigned declared_w = 0, declared_h = 0;
+    bool offer_screen_size = sscanf(argv[4], "%ux%u", &declared_w, &declared_h) != 2;
     const char* controls_path = argv[5];
+    uint32_t max_height = (uint32_t)strtoul(argv[6], NULL, 10);
 
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0"); // no ghost mouse from touch
     SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0"); // no ghost touch from mouse
@@ -582,15 +585,27 @@ int main(int argc, char* argv[]) {
         if (save_last) { memcpy(save_last, boot_save, boot_save_size); save_last_size = boot_save_size; }
     }
 
+    // A size the author declared is the cart's call: 0 has the host offer it,
+    // as the desktop player does. Offered the screen instead, an engine that
+    // lays out from the preference draws for the screen while the host shows
+    // only the declared area, cut off at the edge.
+    // Always offered wide, whichever way up the phone is: the game goes above
+    // the controls when held upright, and can be rotated mid-game.
+    // The player's resolution limit scales either one down, keeping its shape:
+    // a weaker GPU runs a smaller picture, scaled up to fill the screen.
+    uint32_t pref_w = offer_screen_size ? (uint32_t)(win_w > win_h ? win_w : win_h) : declared_w;
+    uint32_t pref_h = offer_screen_size ? (uint32_t)(win_w > win_h ? win_h : win_w) : declared_h;
+    if (max_height > 0 && pref_h > max_height) {
+        pref_w = (uint32_t)((uint64_t)pref_w * max_height / pref_h) & ~1u;
+        pref_h = max_height;
+    } else if (!offer_screen_size) {
+        pref_w = pref_h = 0;
+    }
+    wc_log("offering %ux%u (limit %u)\n", pref_w, pref_h, max_height);
+
     wc_host_options_t opts = {
-        // A size the author declared is the cart's call: 0 has the host offer it,
-        // as the desktop player does. Offered the screen instead, an engine that
-        // lays out from the preference draws for the screen while the host shows
-        // only the declared area, cut off at the edge.
-        // Always offered wide, whichever way up the phone is: the game goes above
-        // the controls when held upright, and can be rotated mid-game.
-        .preferred_width = offer_screen_size ? (uint32_t)(win_w > win_h ? win_w : win_h) : 0,
-        .preferred_height = offer_screen_size ? (uint32_t)(win_w > win_h ? win_h : win_w) : 0,
+        .preferred_width = pref_w,
+        .preferred_height = pref_h,
         .host_fps = (uint32_t)CART_FPS,
         .audio_sample_rate = 48000,
         .save_data = boot_save,

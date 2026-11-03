@@ -122,7 +122,11 @@ static double g_last_render_ms = 0.0;
 // GL
 static GLuint prog = 0, vao = 0, font_tex = 0;
 static GLint  u_screen, u_center, u_half, u_shape, u_color, u_dirbits, u_param, u_uv, u_font;
-enum { SH_CIRCLE = 0, SH_DPAD = 1, SH_RRECT = 2, SH_RING = 3, SH_GLYPH = 4 };
+enum { SH_CIRCLE = 0, SH_DPAD = 1, SH_RRECT = 2, SH_RING = 3, SH_GLYPH = 4, SH_DOTS = 5 };
+
+// Face buttons are never named (pads disagree on which letter sits where): each
+// shows the four-dot diamond with its own position filled. DOT_* go to SH_DOTS.
+enum { DOT_TOP = 0, DOT_RIGHT, DOT_BOTTOM, DOT_LEFT };
 
 // haptics
 static SDL_Haptic* haptic = NULL;
@@ -318,13 +322,13 @@ void overlay_layout(int win_w, int win_h,
     float face_cy = stack_right ? dial_y - dial_r - mm(2.0f) - ring - br : low_y - ring - br;
     if (face_n > 0) {
         if (g_mask & WC_CTRL_A)
-            add_ctl(ID_A, K_BUTTON, WC_BUTTON_A, face_cx, face_cy + ring, br, br, "A", 0.30f, 0.69f, 0.31f);
+            add_ctl(ID_A, K_BUTTON, WC_BUTTON_A, face_cx, face_cy + ring, br, br, NULL, grey, grey, grey);
         if (g_mask & WC_CTRL_B)
-            add_ctl(ID_B, K_BUTTON, WC_BUTTON_B, face_cx + ring, face_cy, br, br, "B", 0.90f, 0.22f, 0.21f);
+            add_ctl(ID_B, K_BUTTON, WC_BUTTON_B, face_cx + ring, face_cy, br, br, NULL, grey, grey, grey);
         if (g_mask & WC_CTRL_X)
-            add_ctl(ID_X, K_BUTTON, WC_BUTTON_X, face_cx - ring, face_cy, br, br, "X", 0.26f, 0.45f, 0.91f);
+            add_ctl(ID_X, K_BUTTON, WC_BUTTON_X, face_cx - ring, face_cy, br, br, NULL, grey, grey, grey);
         if (g_mask & WC_CTRL_Y)
-            add_ctl(ID_Y, K_BUTTON, WC_BUTTON_Y, face_cx, face_cy - ring, br, br, "Y", 0.95f, 0.77f, 0.06f);
+            add_ctl(ID_Y, K_BUTTON, WC_BUTTON_Y, face_cx, face_cy - ring, br, br, NULL, grey, grey, grey);
     }
     float rstick_cx = (face_n == 0 || stack_right) ? win_w - inset - dial_r
                                                    : face_cx - ring - br - dial_r - mm(4.0f);
@@ -743,6 +747,19 @@ static const char* FS =
     "  return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);\n"
     "}\n"
     "void main() {\n"
+    "  if (u_shape == 5) {            // four dots, u_dirbits = the filled one\n"
+    "    vec2 p = v_local * u_half;\n"
+    "    float s = min(u_half.x, u_half.y), dr = s * 0.24;\n"
+    "    vec2 at[4] = vec2[4](vec2(0.0, -s + dr), vec2(s - dr, 0.0), vec2(0.0, s - dr), vec2(-s + dr, 0.0));\n"
+    "    float a = 0.0;\n"
+    "    for (int i = 0; i < 4; i++) {\n"
+    "      float d = length(p - at[i]) - dr;\n"
+    "      float sd = i == u_dirbits ? d : abs(d + dr * 0.18) - dr * 0.18;\n"
+    "      a = max(a, 1.0 - smoothstep(-0.75, 0.75, sd));\n"
+    "    }\n"
+    "    frag = vec4(u_color.rgb, u_color.a * a);\n"
+    "    return;\n"
+    "  }\n"
     "  if (u_shape == 4) {            // label glyph\n"
     "    vec2 t = u_uv.xy + (v_local * 0.5 + 0.5) * u_uv.zw;\n"
     "    frag = vec4(u_color.rgb, u_color.a * texture(u_font, t).r);\n"
@@ -990,6 +1007,12 @@ void overlay_render(bool save_gl_state, double now_ms) {
         } else {
             draw_ctl(c->cx, c->cy, c->hx * grow, c->hy * grow, SH_RRECT,
                      c->r, c->g, c->b, a, 0, c->hy * 0.6f);
+        }
+        int dot = c->id == ID_Y ? DOT_TOP : c->id == ID_B ? DOT_RIGHT
+                : c->id == ID_A ? DOT_BOTTOM : c->id == ID_X ? DOT_LEFT : -1;
+        if (dot >= 0) {
+            float s = fminf(c->hx, c->hy) * 0.62f;
+            draw_ctl(c->cx, c->cy, s, s, SH_DOTS, 1.0f, 1.0f, 1.0f, fminf(0.95f, a * 2.2f), dot, 0.0f);
         }
         if (c->label) {
             // Readable before the shape is: labels sit above the control's opacity

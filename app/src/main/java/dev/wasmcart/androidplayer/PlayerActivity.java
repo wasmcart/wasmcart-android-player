@@ -26,7 +26,8 @@ import org.libsdl.app.SDLActivity;
  * Fullscreen player for one cart, in its own process (":player"). LibraryActivity
  * has already copied the cart to a real file, since the native host's zip reader
  * needs a path. The extras become native's argv: cart path, save file, code cache
- * directory, the size to offer the cart, controls settings file.
+ * directory, the size the cart declares (if it does), controls settings file,
+ * the tallest picture to offer the cart.
  *
  * A small button over the game opens the on-screen controls' settings. The cart
  * pauses while they are open, and the controls can be dragged around the game.
@@ -35,8 +36,9 @@ public class PlayerActivity extends SDLActivity {
     static final String EXTRA_CART = "cart";
     static final String EXTRA_SAVE = "save";
     static final String EXTRA_CODE_CACHE = "code_cache";
-    static final String EXTRA_DECLARES_SIZE = "declares_size";
+    static final String EXTRA_DECLARED_SIZE = "declared_size";
     static final String EXTRA_CONTROLS = "controls";
+    static final String EXTRA_MAX_HEIGHT = "max_height";
 
     // native/overlay.h
     private static final int OV_EDIT = 0, OV_SIZE = 1, OV_OPACITY = 2, OV_GROUPS = 3, OV_FLOATING = 4,
@@ -68,8 +70,9 @@ public class PlayerActivity extends SDLActivity {
             intent.getStringExtra(EXTRA_CART),
             intent.getStringExtra(EXTRA_SAVE),
             intent.getStringExtra(EXTRA_CODE_CACHE),
-            intent.getBooleanExtra(EXTRA_DECLARES_SIZE, false) ? "cart-size" : "screen-size",
+            intent.hasExtra(EXTRA_DECLARED_SIZE) ? intent.getStringExtra(EXTRA_DECLARED_SIZE) : "screen-size",
             intent.getStringExtra(EXTRA_CONTROLS),
+            Integer.toString(intent.getIntExtra(EXTRA_MAX_HEIGHT, 0)),
         };
     }
 

@@ -8,15 +8,17 @@ import android.view.View;
 import android.view.WindowInsets;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 
 /**
  * Settings for every cart: swapped face buttons, the resolution offered to
  * carts, the frame rate readout. Each row changes when chosen, so a gamepad
- * needs nothing but up, down and select.
+ * needs nothing but up, down and the bottom button. On/off rows are switches.
  */
 public class SettingsActivity extends PadActivity {
-    private TextView swapValue, resolutionValue, fpsValue;
+    private Switch swapValue, fpsValue;
+    private TextView resolutionValue;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -26,9 +28,9 @@ public class SettingsActivity extends PadActivity {
         title.setText("Settings");
         title.setTextSize(24);
 
-        swapValue = value();
+        swapValue = toggle();
         resolutionValue = value();
-        fpsValue = value();
+        fpsValue = toggle();
 
         LinearLayout rows = new LinearLayout(this);
         rows.setOrientation(LinearLayout.VERTICAL);
@@ -75,9 +77,9 @@ public class SettingsActivity extends PadActivity {
     }
 
     private void refresh() {
-        swapValue.setText(Settings.swapFace(this) ? "On" : "Off");
+        swapValue.setChecked(Settings.swapFace(this));
         resolutionValue.setText(Settings.resolutionLabel(Settings.maxHeight(this)));
-        fpsValue.setText(Settings.showFps(this) ? "On" : "Off");
+        fpsValue.setChecked(Settings.showFps(this));
     }
 
     private View row(LinearLayout parent, String name, String about, View value, View.OnClickListener onClick) {
@@ -107,6 +109,15 @@ public class SettingsActivity extends PadActivity {
         row.setOnClickListener(onClick);
         parent.addView(row);
         return row;
+    }
+
+    /** Shows the row's state; the row takes the touch or press and flips it. */
+    private Switch toggle() {
+        Switch s = new Switch(this);
+        s.setFocusable(false);
+        s.setClickable(false);
+        s.setPadding(dp(16), 0, 0, 0);
+        return s;
     }
 
     private TextView value() {

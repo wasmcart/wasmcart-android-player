@@ -12,12 +12,12 @@ import android.widget.Switch;
 import android.widget.TextView;
 
 /**
- * Settings for every cart: swapped face buttons, the resolution offered to
+ * Settings for every cart: which face button launches, the resolution offered to
  * carts, the frame rate readout. Each row changes when chosen, so a gamepad
  * needs nothing but up, down and the bottom button. On/off rows are switches.
  */
 public class SettingsActivity extends PadActivity {
-    private Switch swapValue, fpsValue;
+    private Switch launchValue, fpsValue;
     private TextView resolutionValue;
 
     @Override
@@ -28,16 +28,16 @@ public class SettingsActivity extends PadActivity {
         title.setText("Settings");
         title.setTextSize(24);
 
-        swapValue = toggle();
+        launchValue = toggle();
         resolutionValue = value();
         fpsValue = toggle();
 
         LinearLayout rows = new LinearLayout(this);
         rows.setOrientation(LinearLayout.VERTICAL);
-        View first = row(rows, "Swap face buttons",
-                "Turn on if the bottom button acts as the right one, as on Nintendo-style pads. Fixes menus and games.",
-                swapValue, v -> {
-                    Settings.setSwapFace(this, !Settings.swapFace(this));
+        View first = row(rows, "Launch with the right button",
+                "The right face button launches and the bottom one goes back, as on Nintendo consoles. Games see every button as it is.",
+                launchValue, v -> {
+                    Settings.setLaunchRight(this, !Settings.launchRight(this));
                     refresh();
                 });
         row(rows, "Resolution", "The tallest picture a cart draws. Lower runs faster on a weaker device and still fills the screen.",
@@ -77,9 +77,10 @@ public class SettingsActivity extends PadActivity {
     }
 
     private void refresh() {
-        swapValue.setChecked(Settings.swapFace(this));
+        launchValue.setChecked(Settings.launchRight(this));
         resolutionValue.setText(Settings.resolutionLabel(Settings.maxHeight(this)));
         fpsValue.setChecked(Settings.showFps(this));
+        showHints();
     }
 
     private View row(LinearLayout parent, String name, String about, View value, View.OnClickListener onClick) {

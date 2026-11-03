@@ -11,7 +11,7 @@
 // argv (from PlayerActivity): cart path, save file, code cache directory,
 // "screen-size" or the cart's declared "WxH", controls settings file, the
 // tallest picture to offer the cart ("0" for no limit), "fps" to show the
-// frame rate or "0", "swap" to swap the face buttons or "0".
+// frame rate or "0".
 
 #include "wasmcart_host.h"
 #include "wc_log.h"
@@ -138,11 +138,6 @@ static int16_t clamp_trigger(int v) {
     return (int16_t)v;
 }
 
-// Pads that send their bottom button as B (Nintendo-style, and some handhelds
-// in that mode): the player's Swap face buttons setting puts them back, so a
-// cart sees each button where it physically is.
-static bool swap_face = false;
-
 static void poll_pads(wc_pad_t pads[WC_MAX_PADS]) {
     memset(pads, 0, sizeof(wc_pad_t) * WC_MAX_PADS);
     for (int i = 0; i < MAX_CONTROLLERS; i++) {
@@ -150,12 +145,10 @@ static void poll_pads(wc_pad_t pads[WC_MAX_PADS]) {
         if (!gc) continue;
         pads[i].connected = 1;
 
-        uint32_t a = swap_face ? WC_BUTTON_B : WC_BUTTON_A, b = swap_face ? WC_BUTTON_A : WC_BUTTON_B;
-        uint32_t x = swap_face ? WC_BUTTON_Y : WC_BUTTON_X, y = swap_face ? WC_BUTTON_X : WC_BUTTON_Y;
-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_A))            pads[i].buttons |= a;
-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_B))            pads[i].buttons |= b;
-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_X))            pads[i].buttons |= x;
-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_Y))            pads[i].buttons |= y;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_A))            pads[i].buttons |= WC_BUTTON_A;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_B))            pads[i].buttons |= WC_BUTTON_B;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_X))            pads[i].buttons |= WC_BUTTON_X;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_Y))            pads[i].buttons |= WC_BUTTON_Y;
         if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_LEFTSHOULDER)) pads[i].buttons |= WC_BUTTON_L;
         if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER))pads[i].buttons |= WC_BUTTON_R;
         if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_START))        pads[i].buttons |= WC_BUTTON_START;
@@ -499,8 +492,8 @@ static void blit_2d_frame(const uint8_t* fb, uint32_t w, uint32_t h,
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 int main(int argc, char* argv[]) {
-    if (argc < 9) {
-        wc_log_err("expected cart, save, code cache, size, controls, max height, fps and swap arguments\n");
+    if (argc < 8) {
+        wc_log_err("expected cart, save, code cache, size, controls, max height and fps arguments\n");
         return 1;
     }
     const char* cart_path = argv[1];
@@ -511,7 +504,6 @@ int main(int argc, char* argv[]) {
     const char* controls_path = argv[5];
     uint32_t max_height = (uint32_t)strtoul(argv[6], NULL, 10);
     bool show_fps = strcmp(argv[7], "fps") == 0;
-    swap_face = strcmp(argv[8], "swap") == 0;
 
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0"); // no ghost mouse from touch
     SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0"); // no ghost touch from mouse

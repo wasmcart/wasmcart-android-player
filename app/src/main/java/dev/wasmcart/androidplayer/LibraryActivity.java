@@ -301,7 +301,6 @@ public class LibraryActivity extends PadActivity {
         return player
                 .putExtra(PlayerActivity.EXTRA_MAX_HEIGHT, Settings.maxHeight(this))
                 .putExtra(PlayerActivity.EXTRA_SHOW_FPS, Settings.showFps(this))
-                .putExtra(PlayerActivity.EXTRA_SWAP_FACE, Settings.swapFace(this))
                 .putExtra(PlayerActivity.EXTRA_CART, file.getAbsolutePath())
                 .putExtra(PlayerActivity.EXTRA_SAVE, new File(saves, key + ".sav").getAbsolutePath())
                 .putExtra(PlayerActivity.EXTRA_CODE_CACHE, code.getAbsolutePath())

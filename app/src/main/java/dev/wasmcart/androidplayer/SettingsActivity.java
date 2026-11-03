@@ -6,6 +6,7 @@ import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
+import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Switch;
@@ -13,12 +14,13 @@ import android.widget.TextView;
 
 /**
  * Settings for every cart: which face button launches, the resolution offered to
- * carts, the frame rate readout. Rows change by touch; on a pad the face
- * buttons only go back, so a press can never flip a setting by mistake, and
- * the screen shows no button hints. On/off rows are switches.
+ * carts, the frame rate readout. Changes are made by touch and saved at once;
+ * the Back button returns to the library. On a pad the face buttons only go
+ * back, with the meaning they had when the screen opened, so a press can never
+ * flip a setting by mistake. On/off rows are switches.
  *
- * Back keeps the button it had when the screen opened. The launch row previews
- * the new buttons, and the library's hints flash on return.
+ * The launch row previews the new buttons, and the library's hints flash on
+ * return when they changed.
  */
 public class SettingsActivity extends PadActivity {
     private Switch launchValue, fpsValue;
@@ -32,9 +34,17 @@ public class SettingsActivity extends PadActivity {
         super.onCreate(savedInstanceState);
         launchRightHere = Settings.launchRight(this);
 
+        Button back = new Button(this);
+        back.setText("Back");
+        back.setOnClickListener(v -> finish());
         TextView title = new TextView(this);
         title.setText("Settings");
         title.setTextSize(24);
+        title.setPadding(dp(16), 0, 0, 0);
+        LinearLayout header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.addView(back);
+        header.addView(title);
 
         launchValue = toggle();
         previewLaunch = hint("Launch");
@@ -51,7 +61,7 @@ public class SettingsActivity extends PadActivity {
         rows.setOrientation(LinearLayout.VERTICAL);
         firstRow = row(rows, "Launch with the right button",
                 "The right face button launches and the bottom one goes back, as on Nintendo consoles. "
-                        + "Takes effect when you leave this screen. Games see every button as it is.",
+                        + "Games see every button as it is.",
                 preview, launchValue, v -> {
                     Settings.setLaunchRight(this, !Settings.launchRight(this));
                     refresh();
@@ -76,7 +86,7 @@ public class SettingsActivity extends PadActivity {
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.addView(title);
+        root.addView(header);
         root.addView(scroll, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1));
 
         int pad = dp(16);

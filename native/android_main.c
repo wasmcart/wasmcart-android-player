@@ -29,12 +29,9 @@
 #define MAX_CONTROLLERS 4
 #define CART_FPS 60.0
 #define STEP_MS (1000.0 / CART_FPS)
-// Catch-up cap per displayed frame. Only the last frame of a batch is seen, so on
-// a cart too heavy for the device a big batch makes things worse: at 5 steps plus
-// audio top-ups one measured 44 cart frames/s and 5 shown. A cart this far behind
-// runs slower instead.
-#define MAX_STEPS 2
-#define AUDIO_TARGET_MS 80   // keep this much queued (romdev playtest pacing)
+#define MAX_DELTA_MS 250.0   // wasmcart SPEC.md, "Frame timing and the delta clamp"
+#define AUDIO_START_MS 80    // silence queued at the start, against underruns
+#define AUDIO_MAX_MS 500     // queued past this, a frame's audio is dropped
 #define SAVE_CHECK_FRAMES 600
 
 // Shared-host internals also used by the desktop player (gl_imports.cpp)
@@ -90,6 +87,14 @@ Java_dev_wasmcart_androidplayer_PlayerActivity_nativeOverlayGet(JNIEnv* env, jcl
 
 static void open_controller(int device_index) {
     if (!SDL_IsGameController(device_index)) return;
+    // SDL also sends an "added" event for each pad already there when the loop
+    // starts, which main has opened by then: opening it again makes it two players,
+    // with every press delivered to both.
+    SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(device_index);
+    for (int i = 0; i < MAX_CONTROLLERS; i++) {
+        if (controllers[i] && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controllers[i])) == id)
+            return;
+    }
     if (not_a_gamepad(device_index)) {
         wc_log("ignoring %s: not a gamepad\n", SDL_JoystickNameForIndex(device_index));
         return;
@@ -500,6 +505,9 @@ int main(int argc, char* argv[]) {
     // The on-screen pad shows unless a real gamepad is connected, and SDL
     // otherwise lists the phone's accelerometer as a joystick.
     SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "0");
+    // Android's own input path only: SDL's HIDAPI path would read USB pads directly
+    // as well, and ask the player for USB permission to do it.
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0");
     // No SDL_HINT_ORIENTATIONS: a RESIZABLE window with none follows the device
     // and obeys its auto-rotate lock, and the player works both ways up.
 
@@ -654,7 +662,7 @@ int main(int argc, char* argv[]) {
         want.samples = 1024;
         audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
         if (audio_dev) {
-            uint32_t seed_bytes = (uint32_t)have.freq / 20 * audio_bytes_per_frame; // 50ms
+            uint32_t seed_bytes = (uint32_t)have.freq * AUDIO_START_MS / 1000 * audio_bytes_per_frame;
             uint8_t* silence = calloc(1, seed_bytes);
             SDL_QueueAudio(audio_dev, silence, seed_bytes);
             free(silence);
@@ -662,7 +670,7 @@ int main(int argc, char* argv[]) {
             wc_log("audio %dHz %s stereo\n", have.freq, audio_f32 ? "F32" : "S16");
         }
     }
-    uint32_t audio_target_bytes = audio_rate * AUDIO_TARGET_MS / 1000 * audio_bytes_per_frame;
+    uint32_t audio_max_bytes = audio_rate * AUDIO_MAX_MS / 1000 * audio_bytes_per_frame;
 
     for (int i = 0; i < SDL_NumJoysticks(); i++) open_controller(i);
     overlay_show(!any_controller());
@@ -676,7 +684,6 @@ int main(int argc, char* argv[]) {
     // Player 0 starts on the pad when one is paired, else on the touchscreen
     int p0_dev = controllers[0] ? WC_HOST_DEVICE_GAMEPAD : WC_HOST_DEVICE_TOUCH;
     bool text_started = false;
-    bool audio_seen = false;
     bool suspended = false;
     bool was_editing = false;
     int edit_settle = 0;
@@ -855,55 +862,34 @@ int main(int argc, char* argv[]) {
             wc_gl_set_direct(direct);
         }
 
-        // Fixed-step with catch-up: wall clock paces, audio queue refines.
-        int steps = 0;
+        // One cart frame per pass, told how much time really passed, in whole 1/60ths
+        // so a display faster than 60 Hz doesn't run the cart faster. A device that
+        // can't keep up shows fewer frames with the game at full speed: running extra
+        // frames to catch up only spends more of the time it doesn't have, and
+        // dropping the time plays the game in slow motion. Carts size their audio
+        // from the same delta, so sound stays in step too.
         if (editing) {
             if (edit_settle > 0) {
                 edit_settle--;
                 wc_host_run_frame(host);
             }
             acc_ms = 0.0;
-        }
-        while (!editing && acc_ms >= STEP_MS && steps < MAX_STEPS && running) {
-            time_ms += STEP_MS;
-            wc_host_set_time(host, time_ms, STEP_MS, frame_count);
+        } else if (acc_ms >= STEP_MS) {
+            double delta_ms = floor(acc_ms / STEP_MS) * STEP_MS;
+            acc_ms -= delta_ms;
+            if (delta_ms > MAX_DELTA_MS) delta_ms = MAX_DELTA_MS; // a stall, not a slow frame
+            time_ms += delta_ms;
+            wc_host_set_time(host, time_ms, delta_ms, frame_count);
             wc_host_run_frame(host);
             frame_count++;
-            steps++;
-            acc_ms -= STEP_MS;
 
             if (audio_dev) {
                 uint32_t n;
                 bool f32;
                 const void* audio = wc_host_get_audio(host, &n, &f32);
-                if (n > 0) {
+                if (n > 0 && SDL_GetQueuedAudioSize(audio_dev) < audio_max_bytes)
                     SDL_QueueAudio(audio_dev, audio, n * (f32 ? 8 : 4));
-                    audio_seen = true;
-                }
             }
-            if (wc_host_has_trapped(host)) {
-                wc_log_err("cart trapped at frame %u\n", frame_count);
-                save_persist(host);
-                running = false;
-            }
-        }
-        if (steps == MAX_STEPS) acc_ms = 0.0; // dropped time, don't spiral
-
-        // Audio-paced top-up: keep ~AUDIO_TARGET_MS queued so the device never
-        // underruns (the anti-choppiness rule from romdev playtest pacing).
-        int extra = 0;
-        while (running && !editing && audio_dev && audio_seen && extra < 1 &&
-               SDL_GetQueuedAudioSize(audio_dev) < audio_target_bytes) {
-            time_ms += STEP_MS;
-            wc_host_set_time(host, time_ms, STEP_MS, frame_count);
-            wc_host_run_frame(host);
-            frame_count++;
-            extra++;
-            uint32_t n;
-            bool f32;
-            const void* audio = wc_host_get_audio(host, &n, &f32);
-            if (n > 0) SDL_QueueAudio(audio_dev, audio, n * (f32 ? 8 : 4));
-            else break; // cart went quiet; don't spin
             if (wc_host_has_trapped(host)) {
                 wc_log_err("cart trapped at frame %u\n", frame_count);
                 save_persist(host);
@@ -913,7 +899,7 @@ int main(int argc, char* argv[]) {
 
         // First frame: cart may have resized (Godot reads host_info and
         // reconfigures) — grow the redirect FBO to match.
-        if (frame_count > 0 && frame_count <= (uint32_t)MAX_STEPS && is_gl) {
+        if (frame_count > 0 && frame_count <= 5 && is_gl) {
             const wc_cart_info_t* ni = wc_host_get_cart_info(host);
             if (ni->width != cart_w || ni->height != cart_h) {
                 cart_w = ni->width;
@@ -952,16 +938,20 @@ int main(int argc, char* argv[]) {
         {
             static uint64_t perf_at = 0;
             static uint32_t perf_presents = 0, perf_frames = 0;
+            static double perf_clock = 0.0;
             perf_presents++;
             uint64_t t = SDL_GetTicks64();
-            if (!perf_at) { perf_at = t; perf_frames = frame_count; }
+            if (!perf_at) { perf_at = t; perf_frames = frame_count; perf_clock = time_ms; }
             if (t - perf_at >= 5000) {
-                wc_log("perf: %.1f presents/s, %.1f cart frames/s\n",
+                // game speed: 1.00x is real time, under that is slow motion
+                wc_log("perf: %.1f presents/s, %.1f cart frames/s, game speed %.2fx\n",
                        perf_presents * 1000.0 / (double)(t - perf_at),
-                       (frame_count - perf_frames) * 1000.0 / (double)(t - perf_at));
+                       (frame_count - perf_frames) * 1000.0 / (double)(t - perf_at),
+                       (time_ms - perf_clock) / (double)(t - perf_at));
                 perf_at = t;
                 perf_presents = 0;
                 perf_frames = frame_count;
+                perf_clock = time_ms;
             }
         }
 

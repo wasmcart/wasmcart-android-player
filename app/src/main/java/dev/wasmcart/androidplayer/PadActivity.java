@@ -26,6 +26,11 @@ abstract class PadActivity extends Activity {
     /** Where a pad lands when nothing has focus yet. */
     abstract View firstFocus();
 
+    /** Whether the pad's back button leaves this screen. */
+    boolean padGoesBack() {
+        return true;
+    }
+
     /** Whether the right button launches on this screen. */
     boolean launchRight() {
         return Settings.launchRight(this);
@@ -52,8 +57,11 @@ abstract class PadActivity extends Activity {
         if (code != KeyEvent.KEYCODE_BUTTON_A && code != KeyEvent.KEYCODE_BUTTON_B) return super.dispatchKeyEvent(e);
         if (e.getAction() == KeyEvent.ACTION_DOWN && e.getRepeatCount() == 0) {
             boolean choose = (code == KeyEvent.KEYCODE_BUTTON_A) != launchRight();
-            if (!choose) onBackPressed();
-            else if (chooseLabel() != null) choose();
+            if (!choose) {
+                if (padGoesBack()) onBackPressed();
+            } else if (chooseLabel() != null) {
+                choose();
+            }
         }
         return true;
     }
@@ -91,7 +99,7 @@ abstract class PadActivity extends Activity {
         chooseHint = hint(chooseLabel() != null ? chooseLabel() : "");
         backHint = hint("Back");
         if (chooseLabel() != null) footer.addView(chooseHint);
-        footer.addView(backHint);
+        if (padGoesBack()) footer.addView(backHint);
         showHints();
         return footer;
     }

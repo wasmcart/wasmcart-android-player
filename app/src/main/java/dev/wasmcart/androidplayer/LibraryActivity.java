@@ -161,6 +161,12 @@ public class LibraryActivity extends PadActivity {
         return "Launch";
     }
 
+    /** The library is the app's home: a pad press never closes it. */
+    @Override
+    boolean padGoesBack() {
+        return false;
+    }
+
     @Override
     View firstFocus() {
         return adapter.getCount() > 0 ? list : null;

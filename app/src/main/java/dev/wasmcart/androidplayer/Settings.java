@@ -6,7 +6,7 @@ import android.content.SharedPreferences;
 /** The player's settings, for every cart. SettingsActivity changes them. */
 final class Settings {
     private static final String PREFS = "library";
-    private static final String KEY_CONFIRM_RIGHT = "confirm_right";
+    private static final String KEY_SWAP_FACE = "swap_face";
     private static final String KEY_MAX_HEIGHT = "max_height";
     private static final String KEY_SHOW_FPS = "show_fps";
 
@@ -20,16 +20,17 @@ final class Settings {
     }
 
     /**
-     * The right face button selects and the bottom one goes back, instead of the
-     * other way round. Android puts its A on the bottom, but some pads and
-     * handhelds send it from the right, and players differ too.
+     * The pad sends its bottom button as B and its left as Y, as Nintendo-style
+     * pads (and some handhelds in that mode) do, where Android expects A at the
+     * bottom. Swapping puts every face button back where it physically is, in
+     * menus and in games.
      */
-    static boolean confirmRight(Context context) {
-        return prefs(context).getBoolean(KEY_CONFIRM_RIGHT, false);
+    static boolean swapFace(Context context) {
+        return prefs(context).getBoolean(KEY_SWAP_FACE, false);
     }
 
-    static void setConfirmRight(Context context, boolean right) {
-        prefs(context).edit().putBoolean(KEY_CONFIRM_RIGHT, right).apply();
+    static void setSwapFace(Context context, boolean swap) {
+        prefs(context).edit().putBoolean(KEY_SWAP_FACE, swap).apply();
     }
 
     /** A weaker GPU keeps up at a smaller picture, which fills the screen anyway. */

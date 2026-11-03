@@ -11,13 +11,12 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 /**
- * Settings for every cart: which face button selects, the resolution offered to
+ * Settings for every cart: swapped face buttons, the resolution offered to
  * carts, the frame rate readout. Each row changes when chosen, so a gamepad
  * needs nothing but up, down and select.
  */
 public class SettingsActivity extends PadActivity {
-    private LinearLayout confirmValue;
-    private TextView resolutionValue, fpsValue;
+    private TextView swapValue, resolutionValue, fpsValue;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -27,16 +26,16 @@ public class SettingsActivity extends PadActivity {
         title.setText("Settings");
         title.setTextSize(24);
 
-        confirmValue = new LinearLayout(this);
-        confirmValue.setGravity(Gravity.CENTER_VERTICAL);
+        swapValue = value();
         resolutionValue = value();
         fpsValue = value();
 
         LinearLayout rows = new LinearLayout(this);
         rows.setOrientation(LinearLayout.VERTICAL);
-        View first = row(rows, "Select and back", "Which face button selects in menus. Games see every button as it is.",
-                confirmValue, v -> {
-                    Settings.setConfirmRight(this, !Settings.confirmRight(this));
+        View first = row(rows, "Swap face buttons",
+                "Turn on if the bottom button acts as the right one, as on Nintendo-style pads. Fixes menus and games.",
+                swapValue, v -> {
+                    Settings.setSwapFace(this, !Settings.swapFace(this));
                     refresh();
                 });
         row(rows, "Resolution", "The tallest picture a cart draws. Lower runs faster on a weaker device and still fills the screen.",
@@ -76,13 +75,9 @@ public class SettingsActivity extends PadActivity {
     }
 
     private void refresh() {
-        boolean right = Settings.confirmRight(this);
-        confirmValue.removeAllViews();
-        confirmValue.addView(iconText(right ? ButtonIcon.RIGHT : ButtonIcon.BOTTOM, "Select"));
-        confirmValue.addView(iconText(right ? ButtonIcon.BOTTOM : ButtonIcon.RIGHT, "Back"));
+        swapValue.setText(Settings.swapFace(this) ? "On" : "Off");
         resolutionValue.setText(Settings.resolutionLabel(Settings.maxHeight(this)));
         fpsValue.setText(Settings.showFps(this) ? "On" : "Off");
-        showHints();
     }
 
     private View row(LinearLayout parent, String name, String about, View value, View.OnClickListener onClick) {
@@ -122,12 +117,8 @@ public class SettingsActivity extends PadActivity {
         return t;
     }
 
-    private TextView iconText(int filled, String text) {
-        TextView t = value();
-        t.setText(text);
-        t.setGravity(Gravity.CENTER_VERTICAL);
-        t.setCompoundDrawablePadding(dp(6));
-        t.setCompoundDrawables(icon(filled), null, null, null);
-        return t;
+    @Override
+    String chooseLabel() {
+        return "Change";
     }
 }

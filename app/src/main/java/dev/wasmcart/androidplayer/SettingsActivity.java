@@ -39,6 +39,7 @@ public class SettingsActivity extends PadActivity {
                 launchValue, v -> {
                     Settings.setLaunchRight(this, !Settings.launchRight(this));
                     refresh();
+                    flashHints();
                 });
         row(rows, "Resolution", "The tallest picture a cart draws. Lower runs faster on a weaker device and still fills the screen.",
                 resolutionValue, v -> {

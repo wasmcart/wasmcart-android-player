@@ -48,15 +48,36 @@ abstract class PadActivity extends Activity {
         return footer;
     }
 
+    private static final int HINT_COLOR = Color.rgb(200, 205, 215);
+    private static final int FLASH_COLOR = Color.rgb(235, 64, 52);
+    private static final long FLASH_MS = 700;
+    private int hintColor = HINT_COLOR;
+
     void showHints() {
         if (chooseHint == null) return;
         boolean right = Settings.launchRight(this);
         chooseHint.setCompoundDrawables(icon(right ? ButtonIcon.RIGHT : ButtonIcon.BOTTOM), null, null, null);
         backHint.setCompoundDrawables(icon(right ? ButtonIcon.BOTTOM : ButtonIcon.RIGHT), null, null, null);
+        chooseHint.setTextColor(hintColor);
+        backHint.setTextColor(hintColor);
     }
 
+    /** Shows the hints in red for a moment, so a change to them is seen. */
+    void flashHints() {
+        if (chooseHint == null) return;
+        hintColor = FLASH_COLOR;
+        showHints();
+        chooseHint.removeCallbacks(endFlash);
+        chooseHint.postDelayed(endFlash, FLASH_MS);
+    }
+
+    private final Runnable endFlash = () -> {
+        hintColor = HINT_COLOR;
+        showHints();
+    };
+
     ButtonIcon icon(int filled) {
-        ButtonIcon icon = new ButtonIcon(filled, Color.rgb(200, 205, 215));
+        ButtonIcon icon = new ButtonIcon(filled, hintColor);
         icon.setBounds(0, 0, dp(28), dp(28));
         return icon;
     }

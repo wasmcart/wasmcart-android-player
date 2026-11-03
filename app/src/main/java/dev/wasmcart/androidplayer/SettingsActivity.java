@@ -19,6 +19,7 @@ import android.widget.TextView;
 public class SettingsActivity extends PadActivity {
     private Switch launchValue, fpsValue;
     private TextView resolutionValue;
+    private View firstRow;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -34,7 +35,7 @@ public class SettingsActivity extends PadActivity {
 
         LinearLayout rows = new LinearLayout(this);
         rows.setOrientation(LinearLayout.VERTICAL);
-        View first = row(rows, "Launch with the right button",
+        firstRow = row(rows, "Launch with the right button",
                 "The right face button launches and the bottom one goes back, as on Nintendo consoles. Games see every button as it is.",
                 launchValue, v -> {
                     Settings.setLaunchRight(this, !Settings.launchRight(this));
@@ -74,7 +75,7 @@ public class SettingsActivity extends PadActivity {
         });
         setContentView(root);
         refresh();
-        first.requestFocus();
+        firstRow.requestFocus();
     }
 
     private void refresh() {
@@ -133,5 +134,10 @@ public class SettingsActivity extends PadActivity {
     @Override
     String chooseLabel() {
         return "Change";
+    }
+
+    @Override
+    View firstFocus() {
+        return firstRow;
     }
 }

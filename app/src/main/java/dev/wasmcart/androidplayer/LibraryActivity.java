@@ -70,6 +70,7 @@ public class LibraryActivity extends PadActivity {
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private ArrayAdapter<Cart> adapter;
+    private ListView list;
     private TextView status;
     private boolean starting = false;
 
@@ -129,7 +130,7 @@ public class LibraryActivity extends PadActivity {
         status = new TextView(this);
 
         adapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, new ArrayList<>());
-        ListView list = new ListView(this);
+        list = new ListView(this);
         list.setAdapter(adapter);
         list.setOnItemClickListener((parent, view, position, id) -> start(adapter.getItem(position)));
 
@@ -158,6 +159,11 @@ public class LibraryActivity extends PadActivity {
     @Override
     String chooseLabel() {
         return "Launch";
+    }
+
+    @Override
+    View firstFocus() {
+        return adapter.getCount() > 0 ? list : null;
     }
 
     private Uri savedFolder() {

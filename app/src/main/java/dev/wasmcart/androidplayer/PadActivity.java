@@ -4,7 +4,10 @@ import android.app.Activity;
 import android.graphics.Color;
 import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.View;
+import android.widget.AdapterView;
 import android.widget.LinearLayout;
+import android.widget.ListView;
 import android.widget.TextView;
 
 /**
@@ -19,20 +22,56 @@ abstract class PadActivity extends Activity {
     /** What the choosing button does on this screen, for its hint. */
     abstract String chooseLabel();
 
+    /** Where a pad lands when nothing has focus yet. */
+    abstract View firstFocus();
+
     @Override
     protected void onResume() {
         super.onResume();
         showHints();
     }
 
+    /**
+     * The face buttons act here and are always consumed. Handing them on as
+     * other keys did not work: after a touch nothing has focus, the stand-in key
+     * went unhandled, and Android then ran the button's own fallback (B is
+     * Back), whatever the setting said.
+     */
     @Override
     public boolean dispatchKeyEvent(KeyEvent e) {
         int code = e.getKeyCode();
         if (code != KeyEvent.KEYCODE_BUTTON_A && code != KeyEvent.KEYCODE_BUTTON_B) return super.dispatchKeyEvent(e);
-        boolean choose = (code == KeyEvent.KEYCODE_BUTTON_A) != Settings.launchRight(this);
-        return super.dispatchKeyEvent(new KeyEvent(e.getDownTime(), e.getEventTime(), e.getAction(),
-                choose ? KeyEvent.KEYCODE_DPAD_CENTER : KeyEvent.KEYCODE_BACK, e.getRepeatCount(),
-                e.getMetaState(), e.getDeviceId(), e.getScanCode(), e.getFlags(), e.getSource()));
+        if (e.getAction() == KeyEvent.ACTION_DOWN && e.getRepeatCount() == 0) {
+            boolean choose = (code == KeyEvent.KEYCODE_BUTTON_A) != Settings.launchRight(this);
+            if (choose) choose();
+            else onBackPressed();
+        }
+        return true;
+    }
+
+    /** Activates what has focus. With nothing focused, the first press only shows where the pad is. */
+    private void choose() {
+        View focused = getCurrentFocus();
+        if (focused == null || focused.isInTouchMode()) {
+            View first = firstFocus();
+            if (first != null) {
+                first.requestFocusFromTouch(); // leaves touch mode, so the highlight shows
+                if (first instanceof ListView && ((ListView) first).getSelectedItemPosition() == AdapterView.INVALID_POSITION)
+                    ((ListView) first).setSelection(0);
+            }
+            return;
+        }
+        if (focused instanceof ListView) {
+            ListView list = (ListView) focused;
+            int at = list.getSelectedItemPosition();
+            if (at == AdapterView.INVALID_POSITION) {
+                list.setSelection(0);
+                return;
+            }
+            list.performItemClick(list.getSelectedView(), at, list.getItemIdAtPosition(at));
+            return;
+        }
+        focused.performClick();
     }
 
     /** The hints for the bottom of the screen. */

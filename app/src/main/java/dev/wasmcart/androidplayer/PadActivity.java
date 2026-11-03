@@ -18,17 +18,26 @@ import android.widget.TextView;
  */
 abstract class PadActivity extends Activity {
     private TextView chooseHint, backHint;
+    private Boolean shownRight; // the mapping the hints last showed
 
-    /** What the choosing button does on this screen, for its hint. */
+    /** What the choosing button does on this screen, for its hint; null for nothing. */
     abstract String chooseLabel();
 
     /** Where a pad lands when nothing has focus yet. */
     abstract View firstFocus();
 
+    /** Whether the right button launches on this screen. */
+    boolean launchRight() {
+        return Settings.launchRight(this);
+    }
+
+    /** Back from settings with the buttons swapped: the hints flash to say so. */
     @Override
     protected void onResume() {
         super.onResume();
+        boolean changed = shownRight != null && shownRight != launchRight();
         showHints();
+        if (changed) flashHints();
     }
 
     /**
@@ -42,9 +51,9 @@ abstract class PadActivity extends Activity {
         int code = e.getKeyCode();
         if (code != KeyEvent.KEYCODE_BUTTON_A && code != KeyEvent.KEYCODE_BUTTON_B) return super.dispatchKeyEvent(e);
         if (e.getAction() == KeyEvent.ACTION_DOWN && e.getRepeatCount() == 0) {
-            boolean choose = (code == KeyEvent.KEYCODE_BUTTON_A) != Settings.launchRight(this);
-            if (choose) choose();
-            else onBackPressed();
+            boolean choose = (code == KeyEvent.KEYCODE_BUTTON_A) != launchRight();
+            if (!choose) onBackPressed();
+            else if (chooseLabel() != null) choose();
         }
         return true;
     }
@@ -79,26 +88,32 @@ abstract class PadActivity extends Activity {
         LinearLayout footer = new LinearLayout(this);
         footer.setGravity(Gravity.CENTER_VERTICAL);
         footer.setPadding(0, dp(6), 0, dp(6));
-        chooseHint = hint(chooseLabel());
+        chooseHint = hint(chooseLabel() != null ? chooseLabel() : "");
         backHint = hint("Back");
-        footer.addView(chooseHint);
+        if (chooseLabel() != null) footer.addView(chooseHint);
         footer.addView(backHint);
         showHints();
         return footer;
     }
 
-    private static final int HINT_COLOR = Color.rgb(200, 205, 215);
-    private static final int FLASH_COLOR = Color.rgb(235, 64, 52);
-    private static final long FLASH_MS = 700;
+    static final int HINT_COLOR = Color.rgb(200, 205, 215);
+    static final int FLASH_COLOR = Color.rgb(235, 64, 52);
+    static final long FLASH_MS = 700;
     private int hintColor = HINT_COLOR;
 
     void showHints() {
         if (chooseHint == null) return;
-        boolean right = Settings.launchRight(this);
-        chooseHint.setCompoundDrawables(icon(right ? ButtonIcon.RIGHT : ButtonIcon.BOTTOM), null, null, null);
-        backHint.setCompoundDrawables(icon(right ? ButtonIcon.BOTTOM : ButtonIcon.RIGHT), null, null, null);
-        chooseHint.setTextColor(hintColor);
-        backHint.setTextColor(hintColor);
+        boolean right = launchRight();
+        shownRight = right;
+        showButtons(chooseHint, backHint, right, hintColor);
+    }
+
+    /** Puts the launching and back buttons' icons on two labels. */
+    void showButtons(TextView launch, TextView back, boolean right, int color) {
+        launch.setCompoundDrawables(icon(right ? ButtonIcon.RIGHT : ButtonIcon.BOTTOM, color), null, null, null);
+        back.setCompoundDrawables(icon(right ? ButtonIcon.BOTTOM : ButtonIcon.RIGHT, color), null, null, null);
+        launch.setTextColor(color);
+        back.setTextColor(color);
     }
 
     /** Shows the hints in red for a moment, so a change to them is seen. */
@@ -115,8 +130,8 @@ abstract class PadActivity extends Activity {
         showHints();
     };
 
-    ButtonIcon icon(int filled) {
-        ButtonIcon icon = new ButtonIcon(filled, hintColor);
+    ButtonIcon icon(int filled, int color) {
+        ButtonIcon icon = new ButtonIcon(filled, color);
         icon.setBounds(0, 0, dp(28), dp(28));
         return icon;
     }
@@ -125,7 +140,7 @@ abstract class PadActivity extends Activity {
         return Math.round(v * getResources().getDisplayMetrics().density);
     }
 
-    private TextView hint(String text) {
+    TextView hint(String text) {
         TextView t = new TextView(this);
         t.setText(text);
         t.setTextSize(14);

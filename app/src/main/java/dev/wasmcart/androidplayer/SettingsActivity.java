@@ -13,37 +13,52 @@ import android.widget.TextView;
 
 /**
  * Settings for every cart: which face button launches, the resolution offered to
- * carts, the frame rate readout. Each row changes when chosen, so a gamepad
- * needs nothing but up, down and the bottom button. On/off rows are switches.
+ * carts, the frame rate readout. Rows change by touch; on a pad the face
+ * buttons only go back, so a press can never flip a setting by mistake, and
+ * the screen shows no button hints. On/off rows are switches.
+ *
+ * Back keeps the button it had when the screen opened. The launch row previews
+ * the new buttons, and the library's hints flash on return.
  */
 public class SettingsActivity extends PadActivity {
     private Switch launchValue, fpsValue;
     private TextView resolutionValue;
     private View firstRow;
+    private boolean launchRightHere;
+    private TextView previewLaunch, previewBack;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        launchRightHere = Settings.launchRight(this);
 
         TextView title = new TextView(this);
         title.setText("Settings");
         title.setTextSize(24);
 
         launchValue = toggle();
+        previewLaunch = hint("Launch");
+        previewBack = hint("Back");
+        LinearLayout preview = new LinearLayout(this);
+        preview.setGravity(Gravity.CENTER_VERTICAL);
+        preview.setPadding(0, dp(8), 0, 0);
+        preview.addView(previewLaunch);
+        preview.addView(previewBack);
         resolutionValue = value();
         fpsValue = toggle();
 
         LinearLayout rows = new LinearLayout(this);
         rows.setOrientation(LinearLayout.VERTICAL);
         firstRow = row(rows, "Launch with the right button",
-                "The right face button launches and the bottom one goes back, as on Nintendo consoles. Games see every button as it is.",
-                launchValue, v -> {
+                "The right face button launches and the bottom one goes back, as on Nintendo consoles. "
+                        + "Takes effect when you leave this screen. Games see every button as it is.",
+                preview, launchValue, v -> {
                     Settings.setLaunchRight(this, !Settings.launchRight(this));
                     refresh();
-                    flashHints();
+                    flashPreview();
                 });
         row(rows, "Resolution", "The tallest picture a cart draws. Lower runs faster on a weaker device and still fills the screen.",
-                resolutionValue, v -> {
+                null, resolutionValue, v -> {
                     int at = 0;
                     int current = Settings.maxHeight(this);
                     for (int i = 0; i < Settings.MAX_HEIGHTS.length; i++) if (Settings.MAX_HEIGHTS[i] == current) at = i;
@@ -51,7 +66,7 @@ public class SettingsActivity extends PadActivity {
                     refresh();
                 });
         row(rows, "Show FPS", "Frames a second in the corner while a cart runs.",
-                fpsValue, v -> {
+                null, fpsValue, v -> {
                     Settings.setShowFps(this, !Settings.showFps(this));
                     refresh();
                 });
@@ -63,7 +78,6 @@ public class SettingsActivity extends PadActivity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.addView(title);
         root.addView(scroll, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1));
-        root.addView(hints());
 
         int pad = dp(16);
         root.setPadding(pad, pad, pad, 0);
@@ -82,10 +96,30 @@ public class SettingsActivity extends PadActivity {
         launchValue.setChecked(Settings.launchRight(this));
         resolutionValue.setText(Settings.resolutionLabel(Settings.maxHeight(this)));
         fpsValue.setChecked(Settings.showFps(this));
-        showHints();
+        showButtons(previewLaunch, previewBack, Settings.launchRight(this), previewColor);
     }
 
-    private View row(LinearLayout parent, String name, String about, View value, View.OnClickListener onClick) {
+    private int previewColor = HINT_COLOR;
+
+    private void flashPreview() {
+        previewColor = FLASH_COLOR;
+        refresh();
+        previewLaunch.removeCallbacks(endPreviewFlash);
+        previewLaunch.postDelayed(endPreviewFlash, FLASH_MS);
+    }
+
+    private final Runnable endPreviewFlash = () -> {
+        previewColor = HINT_COLOR;
+        refresh();
+    };
+
+    @Override
+    boolean launchRight() {
+        return launchRightHere;
+    }
+
+    private View row(LinearLayout parent, String name, String about, View below, View value,
+                     View.OnClickListener onClick) {
         TextView label = new TextView(this);
         label.setText(name);
         label.setTextSize(18);
@@ -98,6 +132,7 @@ public class SettingsActivity extends PadActivity {
         text.setOrientation(LinearLayout.VERTICAL);
         text.addView(label);
         text.addView(detail);
+        if (below != null) text.addView(below);
 
         LinearLayout row = new LinearLayout(this);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -133,7 +168,7 @@ public class SettingsActivity extends PadActivity {
 
     @Override
     String chooseLabel() {
-        return "Change";
+        return null;
     }
 
     @Override

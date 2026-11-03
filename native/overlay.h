@@ -52,6 +52,10 @@ bool overlay_event(const SDL_Event* ev, int win_w, int win_h, double now_ms);
 // wc_host_set_pads). Marks the pad connected while the overlay is visible.
 void overlay_apply(wc_pad_t* pad);
 
+// The frame rate to show in the corner, or -1 for none. Shown with or without
+// the controls.
+void overlay_set_fps(int fps);
+
 // Draw. Call after the cart's frame is on FBO 0, before SDL_GL_SwapWindow.
 // save_gl_state: true for GL carts (their state caches must survive us).
 void overlay_render(bool save_gl_state, double now_ms);

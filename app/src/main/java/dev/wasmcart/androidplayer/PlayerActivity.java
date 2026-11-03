@@ -27,7 +27,7 @@ import org.libsdl.app.SDLActivity;
  * has already copied the cart to a real file, since the native host's zip reader
  * needs a path. The extras become native's argv: cart path, save file, code cache
  * directory, the size the cart declares (if it does), controls settings file,
- * the tallest picture to offer the cart.
+ * the tallest picture to offer the cart, whether to show the frame rate.
  *
  * A small button over the game opens the on-screen controls' settings. The cart
  * pauses while they are open, and the controls can be dragged around the game.
@@ -39,6 +39,7 @@ public class PlayerActivity extends SDLActivity {
     static final String EXTRA_DECLARED_SIZE = "declared_size";
     static final String EXTRA_CONTROLS = "controls";
     static final String EXTRA_MAX_HEIGHT = "max_height";
+    static final String EXTRA_SHOW_FPS = "show_fps";
 
     // native/overlay.h
     private static final int OV_EDIT = 0, OV_SIZE = 1, OV_OPACITY = 2, OV_GROUPS = 3, OV_FLOATING = 4,
@@ -73,6 +74,7 @@ public class PlayerActivity extends SDLActivity {
             intent.hasExtra(EXTRA_DECLARED_SIZE) ? intent.getStringExtra(EXTRA_DECLARED_SIZE) : "screen-size",
             intent.getStringExtra(EXTRA_CONTROLS),
             Integer.toString(intent.getIntExtra(EXTRA_MAX_HEIGHT, 0)),
+            intent.getBooleanExtra(EXTRA_SHOW_FPS, false) ? "fps" : "0",
         };
     }
 

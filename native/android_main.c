@@ -10,7 +10,8 @@
 //
 // argv (from PlayerActivity): cart path, save file, code cache directory,
 // "screen-size" or the cart's declared "WxH", controls settings file, the
-// tallest picture to offer the cart ("0" for no limit).
+// tallest picture to offer the cart ("0" for no limit), "fps" to show the
+// frame rate or "0".
 
 #include "wasmcart_host.h"
 #include "wc_log.h"
@@ -491,8 +492,8 @@ static void blit_2d_frame(const uint8_t* fb, uint32_t w, uint32_t h,
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 int main(int argc, char* argv[]) {
-    if (argc < 7) {
-        wc_log_err("expected cart, save, code cache, size, controls and max height arguments\n");
+    if (argc < 8) {
+        wc_log_err("expected cart, save, code cache, size, controls, max height and fps arguments\n");
         return 1;
     }
     const char* cart_path = argv[1];
@@ -502,6 +503,7 @@ int main(int argc, char* argv[]) {
     bool offer_screen_size = sscanf(argv[4], "%ux%u", &declared_w, &declared_h) != 2;
     const char* controls_path = argv[5];
     uint32_t max_height = (uint32_t)strtoul(argv[6], NULL, 10);
+    bool show_fps = strcmp(argv[7], "fps") == 0;
 
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0"); // no ghost mouse from touch
     SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0"); // no ghost touch from mouse
@@ -945,6 +947,20 @@ int main(int argc, char* argv[]) {
             uint32_t w, h;
             const uint8_t* fb = wc_host_get_framebuffer(host, &w, &h);
             if (fb && w > 0 && h > 0) blit_2d_frame(fb, w, h, win_w, win_h);
+        }
+        // Cart frames a second, the rate the game really moves at, twice a second
+        if (show_fps) {
+            static uint64_t fps_at = 0;
+            static uint32_t fps_frames = 0;
+            static int fps = 0;
+            uint64_t t = SDL_GetTicks64();
+            if (!fps_at) { fps_at = t; fps_frames = frame_count; }
+            if (t - fps_at >= 500) {
+                fps = (int)((frame_count - fps_frames) * 1000.0 / (double)(t - fps_at) + 0.5);
+                fps_at = t;
+                fps_frames = frame_count;
+            }
+            overlay_set_fps(fps);
         }
         overlay_render(is_gl, (double)now);
         SDL_GL_SwapWindow(window); // vsync paces the loop

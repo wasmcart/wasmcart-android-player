@@ -136,9 +136,9 @@ static SDL_mutex* cmd_lock = NULL;
 static struct { int key, value; } cmd_queue[32];
 static int cmd_count = 0;
 
-// ─── Label font: 5x7, only the letters the controls use ─────────────────────
+// ─── Label font: 5x7, only the characters the controls and FPS readout use ──
 
-static const char FONT_CHARS[] = "ABELRSTXY3";
+static const char FONT_CHARS[] = "ABELRSTXY0123456789FP";
 static const uint8_t FONT[][7] = {
     {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11}, // A
     {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E}, // B
@@ -149,7 +149,18 @@ static const uint8_t FONT[][7] = {
     {0x1F,0x04,0x04,0x04,0x04,0x04,0x04}, // T
     {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11}, // X
     {0x11,0x11,0x0A,0x04,0x04,0x04,0x04}, // Y
+    {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E}, // 0
+    {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E}, // 1
+    {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F}, // 2
     {0x1E,0x01,0x01,0x0E,0x01,0x01,0x1E}, // 3
+    {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02}, // 4
+    {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E}, // 5
+    {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E}, // 6
+    {0x1F,0x01,0x02,0x04,0x08,0x08,0x08}, // 7
+    {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E}, // 8
+    {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C}, // 9
+    {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10}, // F
+    {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10}, // P
 };
 #define FONT_N (sizeof(FONT) / sizeof(FONT[0]))
 #define FONT_CELL 6                   // 5 wide + 1 blank so filtering can't bleed
@@ -749,7 +760,7 @@ static const char* FS =
     "void main() {\n"
     "  if (u_shape == 5) {            // four dots, u_dirbits = the filled one\n"
     "    vec2 p = v_local * u_half;\n"
-    "    float s = min(u_half.x, u_half.y), dr = s * 0.24;\n"
+    "    float s = min(u_half.x, u_half.y), dr = s * 0.30;\n"
     "    vec2 at[4] = vec2[4](vec2(0.0, -s + dr), vec2(s - dr, 0.0), vec2(0.0, s - dr), vec2(-s + dr, 0.0));\n"
     "    float a = 0.0;\n"
     "    for (int i = 0; i < 4; i++) {\n"
@@ -912,6 +923,12 @@ static void draw_label(const char* s, float cx, float cy, float height, float a)
     }
 }
 
+static int g_fps = -1;
+
+void overlay_set_fps(int fps) {
+    g_fps = fps;
+}
+
 void overlay_render(bool save_gl_state, double now_ms) {
     // advance fades even while invisible so re-show starts from reality
     float dt = (g_last_render_ms > 0.0) ? (float)(now_ms - g_last_render_ms) : 16.7f;
@@ -928,7 +945,8 @@ void overlay_render(bool save_gl_state, double now_ms) {
     float base = fminf(1.0f, (float)cfg.opacity / 100.0f);
     if (g_editing) base = fmaxf(base, 0.6f); // what is being arranged must be visible
     float alpha = base * g_fade * g_dim;
-    if (alpha < 0.01f) return;
+    bool draw_pad = alpha >= 0.01f;
+    if (!draw_pad && g_fps < 0) return;
 
     // GL carts keep internal state caches (Ganesh, gl4es); save what we touch.
     // The framebuffer above all: the host keeps a GL cart bound to its redirect
@@ -976,7 +994,7 @@ void overlay_render(bool save_gl_state, double now_ms) {
     glUniform1i(u_font, 0);
     glUniform2f(u_screen, (float)g_win_w, (float)g_win_h);
 
-    for (int i = 0; i < n_ctls; i++) {
+    for (int i = 0; draw_pad && i < n_ctls; i++) {
         ctl_t* c = &ctls[i];
         float target = c->pressed ? 1.0f : 0.0f;
         c->press_anim += (target - c->press_anim) * fminf(1.0f, dt / 60.0f);
@@ -1019,6 +1037,20 @@ void overlay_render(bool save_gl_state, double now_ms) {
             float h = fminf(c->hy, c->hx) * (strlen(c->label) > 1 ? 0.65f : 0.8f);
             draw_label(c->label, c->cx, c->cy, h, fminf(0.95f, a * 2.2f));
         }
+    }
+
+    // Top left, over everything, pad or no pad. A multiple of the font's 7 rows
+    // keeps nearest sampling even.
+    if (g_fps >= 0) {
+        char text[16];
+        snprintf(text, sizeof(text), "%d FPS", g_fps);
+        float h = fmaxf(7.0f, roundf(mm(2.5f) / 7.0f) * 7.0f);
+        float adv = h * 5.0f / 7.0f * 1.25f;
+        float tw = adv * (float)(strlen(text) - 1) + h * 5.0f / 7.0f;
+        float pad = h * 0.4f, x = mm(3.0f), y = mm(3.0f);
+        draw_ctl(x + tw * 0.5f + pad, y + h * 0.5f + pad, tw * 0.5f + pad, h * 0.5f + pad, SH_RRECT,
+                 0.0f, 0.0f, 0.0f, 0.55f, 0, pad * 0.5f);
+        draw_label(text, x + pad + tw * 0.5f, y + pad + h * 0.5f, h, 0.95f);
     }
 
     if (save_gl_state) {

@@ -61,6 +61,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden" />
+
         <!-- One process per cart: V8 cannot start twice in a process, and a
              cart that crashes the host must not take the library with it. -->
         <activity

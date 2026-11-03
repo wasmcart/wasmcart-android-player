@@ -28,7 +28,7 @@ final class ButtonIcon extends Drawable {
         Rect b = getBounds();
         float s = Math.min(b.width(), b.height()) * 0.5f;
         float cx = b.exactCenterX(), cy = b.exactCenterY();
-        float r = s * 0.24f, stroke = r * 0.36f;
+        float r = s * 0.30f, stroke = r * 0.30f;
         float[][] at = { { 0, -s + r }, { s - r, 0 }, { 0, s - r }, { -s + r, 0 } };
         for (int i = 0; i < 4; i++) {
             if (i == filled) {

@@ -1,6 +1,5 @@
 package dev.wasmcart.androidplayer;
 
-import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.AlertDialog;
 import android.content.Intent;
@@ -10,9 +9,7 @@ import android.os.Bundle;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import android.util.Log;
-import android.graphics.Color;
 import android.view.Gravity;
-import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowInsets;
 import android.widget.ArrayAdapter;
@@ -45,15 +42,11 @@ import java.util.zip.ZipFile;
  * for .wasc files opened from anywhere else. Choosing a cart copies it to a real
  * file and starts PlayerActivity in its own process.
  */
-public class LibraryActivity extends Activity {
+public class LibraryActivity extends PadActivity {
     private static final String TAG = "wasmcart";
     private static final int PICK_FOLDER = 1;
     private static final String PREFS = "library";
     private static final String KEY_FOLDER = "folder";
-    private static final String KEY_CONFIRM_RIGHT = "confirm_right";
-    private static final String KEY_MAX_HEIGHT = "max_height";
-    /** Resolution choices: the tallest picture offered to a cart, 0 for the screen's. */
-    private static final int[] MAX_HEIGHTS = { 0, 1080, 720, 540 };
     private static final long CART_CACHE_BYTES = 2L << 30;
 
     private static final class Cart {
@@ -78,7 +71,6 @@ public class LibraryActivity extends Activity {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private ArrayAdapter<Cart> adapter;
     private TextView status;
-    private TextView selectHint, backHint;
     private boolean starting = false;
 
     @Override
@@ -123,21 +115,14 @@ public class LibraryActivity extends Activity {
             else pickFolder();
         });
 
-        // A weaker GPU keeps up at a smaller picture, which fills the screen anyway
-        Button resolution = new Button(this);
-        resolution.setText(resolutionLabel());
-        resolution.setOnClickListener(v -> {
-            int at = 0;
-            for (int i = 0; i < MAX_HEIGHTS.length; i++) if (MAX_HEIGHTS[i] == maxHeight()) at = i;
-            int next = MAX_HEIGHTS[(at + 1) % MAX_HEIGHTS.length];
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(KEY_MAX_HEIGHT, next).apply();
-            resolution.setText(resolutionLabel());
-        });
+        Button settings = new Button(this);
+        settings.setText("Settings");
+        settings.setOnClickListener(v -> startActivity(new Intent(this, SettingsActivity.class)));
 
         LinearLayout header = new LinearLayout(this);
         header.setGravity(Gravity.CENTER_VERTICAL);
         header.addView(title, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-        header.addView(resolution);
+        header.addView(settings);
         header.addView(choose);
         header.addView(rescan);
 
@@ -148,29 +133,12 @@ public class LibraryActivity extends Activity {
         list.setAdapter(adapter);
         list.setOnItemClickListener((parent, view, position, id) -> start(adapter.getItem(position)));
 
-        // Which face button selects. Android puts its A on the bottom, but some
-        // pads and handhelds send it from the right, and players differ too.
-        selectHint = hint("Select");
-        backHint = hint("Back");
-        Button swap = new Button(this);
-        swap.setText("Swap");
-        swap.setOnClickListener(v -> {
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_CONFIRM_RIGHT, !confirmRight()).apply();
-            showHints();
-        });
-        LinearLayout footer = new LinearLayout(this);
-        footer.setGravity(Gravity.CENTER_VERTICAL);
-        footer.addView(selectHint);
-        footer.addView(backHint);
-        footer.addView(swap);
-        showHints();
-
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.addView(header);
         root.addView(status);
         root.addView(list, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1));
-        root.addView(footer);
+        root.addView(hints());
 
         // Target SDK 36 draws edge to edge; keep the list off the system bars.
         // Older Android may never call the listener, so start padded.
@@ -183,59 +151,6 @@ public class LibraryActivity extends Activity {
             return WindowInsets.CONSUMED;
         });
         return root;
-    }
-
-    // ─── Gamepad ────────────────────────────────────────────────────────────
-
-    private int maxHeight() {
-        return getSharedPreferences(PREFS, MODE_PRIVATE).getInt(KEY_MAX_HEIGHT, 0);
-    }
-
-    private String resolutionLabel() {
-        return maxHeight() == 0 ? "Full res" : maxHeight() + "p";
-    }
-
-    private boolean confirmRight() {
-        return getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_CONFIRM_RIGHT, false);
-    }
-
-    private TextView hint(String text) {
-        TextView t = new TextView(this);
-        t.setText(text);
-        t.setTextSize(14);
-        t.setGravity(Gravity.CENTER_VERTICAL);
-        t.setCompoundDrawablePadding(dp(6));
-        t.setPadding(0, 0, dp(20), 0);
-        return t;
-    }
-
-    private void showHints() {
-        int color = Color.rgb(200, 205, 215);
-        int select = confirmRight() ? ButtonIcon.RIGHT : ButtonIcon.BOTTOM;
-        int back = confirmRight() ? ButtonIcon.BOTTOM : ButtonIcon.RIGHT;
-        selectHint.setCompoundDrawables(icon(select, color), null, null, null);
-        backHint.setCompoundDrawables(icon(back, color), null, null, null);
-    }
-
-    private ButtonIcon icon(int filled, int color) {
-        ButtonIcon icon = new ButtonIcon(filled, color);
-        icon.setBounds(0, 0, dp(28), dp(28));
-        return icon;
-    }
-
-    private int dp(int v) {
-        return Math.round(v * getResources().getDisplayMetrics().density);
-    }
-
-    /** The bottom and right face buttons select and go back, in whichever order the player chose. */
-    @Override
-    public boolean dispatchKeyEvent(KeyEvent e) {
-        int code = e.getKeyCode();
-        if (code != KeyEvent.KEYCODE_BUTTON_A && code != KeyEvent.KEYCODE_BUTTON_B) return super.dispatchKeyEvent(e);
-        boolean select = (code == KeyEvent.KEYCODE_BUTTON_A) != confirmRight();
-        return super.dispatchKeyEvent(new KeyEvent(e.getDownTime(), e.getEventTime(), e.getAction(),
-                select ? KeyEvent.KEYCODE_DPAD_CENTER : KeyEvent.KEYCODE_BACK, e.getRepeatCount(),
-                e.getMetaState(), e.getDeviceId(), e.getScanCode(), e.getFlags(), e.getSource()));
     }
 
     // ─── Folder ─────────────────────────────────────────────────────────────
@@ -379,7 +294,8 @@ public class LibraryActivity extends Activity {
         Intent player = new Intent(this, PlayerActivity.class);
         if (size[0] > 0 && size[1] > 0) player.putExtra(PlayerActivity.EXTRA_DECLARED_SIZE, size[0] + "x" + size[1]);
         return player
-                .putExtra(PlayerActivity.EXTRA_MAX_HEIGHT, maxHeight())
+                .putExtra(PlayerActivity.EXTRA_MAX_HEIGHT, Settings.maxHeight(this))
+                .putExtra(PlayerActivity.EXTRA_SHOW_FPS, Settings.showFps(this))
                 .putExtra(PlayerActivity.EXTRA_CART, file.getAbsolutePath())
                 .putExtra(PlayerActivity.EXTRA_SAVE, new File(saves, key + ".sav").getAbsolutePath())
                 .putExtra(PlayerActivity.EXTRA_CODE_CACHE, code.getAbsolutePath())

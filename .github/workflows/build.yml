@@ -43,9 +43,10 @@ jobs:
           WASMCART_KEYSTORE_PASSWORD: ${{ secrets.WASMCART_KEYSTORE_PASSWORD }}
           WASMCART_KEY_ALIAS: ${{ secrets.WASMCART_KEY_ALIAS }}
           WASMCART_KEY_PASSWORD: ${{ secrets.WASMCART_KEY_PASSWORD }}
-          WASMCART_VERSION_CODE: ${{ github.run_number }}
           WASMCART_VERSION_NAME: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('0.1.0-{0}', github.run_number) }}
-        run: ./gradlew assembleRelease --no-daemon
+        # Version codes start at 1000 so a CI APK installs over the hand-built
+        # ones used for testing (codes below 100) without an uninstall.
+        run: WASMCART_VERSION_CODE=$((1000 + GITHUB_RUN_NUMBER)) ./gradlew assembleRelease --no-daemon
 
       - name: Name the APK
         env:

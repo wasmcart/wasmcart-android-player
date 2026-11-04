@@ -24,6 +24,15 @@ desktop player and the libretro core, [wasmcart-native](https://github.com/wasmc
   opens the settings. Switch sticks, stick clicks, shoulders and triggers on or off
   for any cart, whatever it declares (with sticks off, the left thumb gets a d-pad);
   drag any control; change size and opacity; choose fixed or floating sticks.
+- **Gamepad menus**: the library and settings work from a pad. The first face-button
+  press asks you to press the bottom face button, since devices disagree on which
+  key it sends (a Retroid Pocket 5 in its Nintendo style sends B from there); after
+  that the bottom button launches, and games see each button where it physically
+  is. Settings can ask again, or make the right button launch instead. Hold
+  **Start + Select** for a second to save and quit a game.
+- **Settings**: a resolution limit (full, 1080p, 720p, 540p) for carts that take the
+  screen size, so a weaker GPU keeps up while the picture still fills the screen;
+  carts that declare a size keep it. A frames-per-second readout can be switched on.
 - **Either way up**: the player follows the device and its auto-rotate lock, even
   mid-game. Held upright, the game goes at the top with the controls below it, and
   the layout you arrange is kept separately for each orientation.

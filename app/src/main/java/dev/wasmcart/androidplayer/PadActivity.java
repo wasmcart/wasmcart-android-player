@@ -1,7 +1,9 @@
 package dev.wasmcart.androidplayer;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.graphics.Color;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
@@ -54,9 +56,20 @@ abstract class PadActivity extends Activity {
     @Override
     public boolean dispatchKeyEvent(KeyEvent e) {
         int code = e.getKeyCode();
+        if (e.getAction() == KeyEvent.ACTION_DOWN && e.getRepeatCount() == 0) {
+            // adb logcat -s wasmcart: which key each button really sends
+            Log.i("wasmcart", getClass().getSimpleName() + " key " + KeyEvent.keyCodeToString(code)
+                    + " from " + (e.getDevice() != null ? e.getDevice().getName() : "?")
+                    + ", launch right " + launchRight());
+        }
         if (code != KeyEvent.KEYCODE_BUTTON_A && code != KeyEvent.KEYCODE_BUTTON_B) return super.dispatchKeyEvent(e);
         if (e.getAction() == KeyEvent.ACTION_DOWN && e.getRepeatCount() == 0) {
-            boolean choose = (code == KeyEvent.KEYCODE_BUTTON_A) != launchRight();
+            if (Settings.bottomCode(this) == 0) {
+                askBottomButton(null);
+                return true;
+            }
+            boolean bottom = code == Settings.bottomCode(this);
+            boolean choose = bottom != launchRight();
             if (!choose) {
                 if (padGoesBack()) onBackPressed();
             } else if (chooseLabel() != null) {
@@ -66,8 +79,35 @@ abstract class PadActivity extends Activity {
         return true;
     }
 
+    /**
+     * Asks for the bottom face button and remembers the key it sends, so every
+     * menu and game knows where each button really is.
+     */
+    void askBottomButton(Runnable done) {
+        TextView prompt = new TextView(this);
+        prompt.setText("Press the bottom face button on your controller.");
+        prompt.setTextSize(18);
+        prompt.setGravity(Gravity.CENTER_VERTICAL);
+        prompt.setCompoundDrawablePadding(dp(14));
+        prompt.setCompoundDrawables(icon(ButtonIcon.BOTTOM, Color.WHITE), null, null, null);
+        prompt.setPadding(dp(24), dp(24), dp(24), dp(24));
+        AlertDialog dialog = new AlertDialog.Builder(this).setView(prompt).create();
+        dialog.setOnKeyListener((d, keyCode, event) -> {
+            if (keyCode != KeyEvent.KEYCODE_BUTTON_A && keyCode != KeyEvent.KEYCODE_BUTTON_B) return false;
+            if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+                Settings.setBottomCode(this, keyCode);
+                Log.i("wasmcart", "bottom face button sends " + KeyEvent.keyCodeToString(keyCode));
+                d.dismiss();
+                flashHints();
+                if (done != null) done.run();
+            }
+            return true;
+        });
+        dialog.show();
+    }
+
     /** Activates what has focus. With nothing focused, the first press only shows where the pad is. */
-    private void choose() {
+    void choose() {
         View focused = getCurrentFocus();
         if (focused == null || focused.isInTouchMode()) {
             View first = firstFocus();

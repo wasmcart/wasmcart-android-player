@@ -11,7 +11,7 @@
 // argv (from PlayerActivity): cart path, save file, code cache directory,
 // "screen-size" or the cart's declared "WxH", controls settings file, the
 // tallest picture to offer the cart ("0" for no limit), "fps" to show the
-// frame rate or "0".
+// frame rate or "0", "swap" if the pad sends B from its bottom button or "0".
 
 #include "wasmcart_host.h"
 #include "wc_log.h"
@@ -31,6 +31,7 @@
 #define MAX_CONTROLLERS 4
 #define CART_FPS 60.0
 #define STEP_MS (1000.0 / CART_FPS)
+#define QUIT_HOLD_MS 1000
 #define MAX_DELTA_MS 250.0   // wasmcart SPEC.md, "Frame timing and the delta clamp"
 #define AUDIO_START_MS 80    // silence queued at the start, against underruns
 #define AUDIO_MAX_MS 500     // queued past this, a frame's audio is dropped
@@ -138,6 +139,12 @@ static int16_t clamp_trigger(int v) {
     return (int16_t)v;
 }
 
+// A pad that sends B from its bottom face button (and Y from the left), as a
+// Retroid Pocket 5 does in its default mode: the library asked the player to
+// press the bottom button, and this swaps them back, so a cart sees each
+// button where it physically is.
+static bool swap_face = false;
+
 static void poll_pads(wc_pad_t pads[WC_MAX_PADS]) {
     memset(pads, 0, sizeof(wc_pad_t) * WC_MAX_PADS);
     for (int i = 0; i < MAX_CONTROLLERS; i++) {
@@ -145,10 +152,12 @@ static void poll_pads(wc_pad_t pads[WC_MAX_PADS]) {
         if (!gc) continue;
         pads[i].connected = 1;
 
-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_A))            pads[i].buttons |= WC_BUTTON_A;
-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_B))            pads[i].buttons |= WC_BUTTON_B;
-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_X))            pads[i].buttons |= WC_BUTTON_X;
-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_Y))            pads[i].buttons |= WC_BUTTON_Y;
+        uint32_t a = swap_face ? WC_BUTTON_B : WC_BUTTON_A, b = swap_face ? WC_BUTTON_A : WC_BUTTON_B;
+        uint32_t x = swap_face ? WC_BUTTON_Y : WC_BUTTON_X, y = swap_face ? WC_BUTTON_X : WC_BUTTON_Y;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_A))            pads[i].buttons |= a;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_B))            pads[i].buttons |= b;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_X))            pads[i].buttons |= x;
+        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_Y))            pads[i].buttons |= y;
         if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_LEFTSHOULDER)) pads[i].buttons |= WC_BUTTON_L;
         if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER))pads[i].buttons |= WC_BUTTON_R;
         if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_START))        pads[i].buttons |= WC_BUTTON_START;
@@ -492,8 +501,8 @@ static void blit_2d_frame(const uint8_t* fb, uint32_t w, uint32_t h,
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 int main(int argc, char* argv[]) {
-    if (argc < 8) {
-        wc_log_err("expected cart, save, code cache, size, controls, max height and fps arguments\n");
+    if (argc < 9) {
+        wc_log_err("expected cart, save, code cache, size, controls, max height, fps and swap arguments\n");
         return 1;
     }
     const char* cart_path = argv[1];
@@ -504,6 +513,8 @@ int main(int argc, char* argv[]) {
     const char* controls_path = argv[5];
     uint32_t max_height = (uint32_t)strtoul(argv[6], NULL, 10);
     bool show_fps = strcmp(argv[7], "fps") == 0;
+    swap_face = strcmp(argv[8], "swap") == 0;
+    wc_log("face buttons %s\n", swap_face ? "swapped (pad sends B from the bottom)" : "as sent");
 
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0"); // no ghost mouse from touch
     SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0"); // no ghost touch from mouse
@@ -855,6 +866,30 @@ int main(int argc, char* argv[]) {
         }
 
         poll_pads(pads);
+
+        // Hold Start + Select on any real pad for a second: save and back to
+        // the library. Held, so a cart that uses the pair for a quick press
+        // keeps it; the on-screen pad is left out, there the system back works.
+        {
+            static uint64_t quit_held_since = 0;
+            bool held = false;
+            for (int i = 0; i < MAX_CONTROLLERS; i++) {
+                SDL_GameController* gc = controllers[i];
+                if (gc && SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_START) &&
+                    SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_BACK))
+                    held = true;
+            }
+            uint64_t t = SDL_GetTicks64();
+            if (!held) {
+                quit_held_since = 0;
+            } else if (!quit_held_since) {
+                quit_held_since = t;
+            } else if (t - quit_held_since >= QUIT_HOLD_MS) {
+                wc_log("start+select held: quitting to the library\n");
+                save_persist(host);
+                running = false;
+            }
+        }
         update_input_devices(host, pads, &p0_dev);
         overlay_apply(&pads[0]);
         wc_host_set_pads(host, pads);

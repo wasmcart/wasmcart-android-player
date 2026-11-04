@@ -71,6 +71,7 @@ public class LibraryActivity extends PadActivity {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private ArrayAdapter<Cart> adapter;
     private ListView list;
+    private int current = 0; // the highlighted cart; one press launches it
     private TextView status;
     private boolean starting = false;
 
@@ -132,7 +133,16 @@ public class LibraryActivity extends PadActivity {
         adapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, new ArrayList<>());
         list = new ListView(this);
         list.setAdapter(adapter);
-        list.setOnItemClickListener((parent, view, position, id) -> start(adapter.getItem(position)));
+        list.setOnItemClickListener((parent, view, position, id) -> {
+            current = position;
+            start(adapter.getItem(position));
+        });
+        list.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> p, View v, int position, long id) {
+                current = position;
+            }
+            @Override public void onNothingSelected(android.widget.AdapterView<?> p) { }
+        });
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -159,6 +169,29 @@ public class LibraryActivity extends PadActivity {
     @Override
     String chooseLabel() {
         return "Launch";
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        highlight();
+    }
+
+    /** A cart is always highlighted, so a pad never has to find its place first. */
+    private void highlight() {
+        if (adapter.getCount() == 0) return;
+        if (current >= adapter.getCount()) current = 0;
+        list.requestFocusFromTouch();
+        list.setSelection(current);
+    }
+
+    /** The launch button starts the highlighted cart, even after a touch hid the highlight. */
+    @Override
+    void choose() {
+        if (adapter.getCount() == 0) return;
+        if (current >= adapter.getCount()) current = 0;
+        highlight();
+        start(adapter.getItem(current));
     }
 
     /** The library is the app's home: a pad press never closes it. */
@@ -208,6 +241,7 @@ public class LibraryActivity extends PadActivity {
             runOnUiThread(() -> {
                 adapter.clear();
                 adapter.addAll(found);
+                highlight();
                 status.setText(message);
             });
         });
@@ -313,6 +347,7 @@ public class LibraryActivity extends PadActivity {
         return player
                 .putExtra(PlayerActivity.EXTRA_MAX_HEIGHT, Settings.maxHeight(this))
                 .putExtra(PlayerActivity.EXTRA_SHOW_FPS, Settings.showFps(this))
+                .putExtra(PlayerActivity.EXTRA_BOTTOM_SENDS_B, Settings.bottomSendsB(this))
                 .putExtra(PlayerActivity.EXTRA_CART, file.getAbsolutePath())
                 .putExtra(PlayerActivity.EXTRA_SAVE, new File(saves, key + ".sav").getAbsolutePath())
                 .putExtra(PlayerActivity.EXTRA_CODE_CACHE, code.getAbsolutePath())

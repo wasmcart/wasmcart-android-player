@@ -24,7 +24,7 @@ import android.widget.TextView;
  */
 public class SettingsActivity extends PadActivity {
     private Switch launchValue, fpsValue;
-    private TextView resolutionValue;
+    private TextView resolutionValue, controllerValue;
     private View firstRow;
     private boolean launchRightHere;
     private TextView previewLaunch, previewBack;
@@ -56,6 +56,7 @@ public class SettingsActivity extends PadActivity {
         preview.addView(previewBack);
         resolutionValue = value();
         fpsValue = toggle();
+        controllerValue = value();
 
         LinearLayout rows = new LinearLayout(this);
         rows.setOrientation(LinearLayout.VERTICAL);
@@ -67,6 +68,8 @@ public class SettingsActivity extends PadActivity {
                     refresh();
                     flashPreview();
                 });
+        row(rows, "Set up controller", "Press the bottom face button when asked, so menus and games know where each button is.",
+                null, controllerValue, v -> askBottomButton(this::refresh));
         row(rows, "Resolution", "The tallest picture a cart draws. Lower runs faster on a weaker device and still fills the screen.",
                 null, resolutionValue, v -> {
                     int at = 0;
@@ -106,6 +109,7 @@ public class SettingsActivity extends PadActivity {
         launchValue.setChecked(Settings.launchRight(this));
         resolutionValue.setText(Settings.resolutionLabel(Settings.maxHeight(this)));
         fpsValue.setChecked(Settings.showFps(this));
+        controllerValue.setText(Settings.bottomCode(this) == 0 ? "Not set" : "Done");
         showButtons(previewLaunch, previewBack, Settings.launchRight(this), previewColor);
     }
 

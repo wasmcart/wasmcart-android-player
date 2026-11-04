@@ -604,17 +604,17 @@ int main(int argc, char* argv[]) {
     // only the declared area, cut off at the edge.
     // Always offered wide, whichever way up the phone is: the game goes above
     // the controls when held upright, and can be rotated mid-game.
-    // The player's resolution limit scales either one down, keeping its shape:
-    // a weaker GPU runs a smaller picture, scaled up to fill the screen.
-    uint32_t pref_w = offer_screen_size ? (uint32_t)(win_w > win_h ? win_w : win_h) : declared_w;
-    uint32_t pref_h = offer_screen_size ? (uint32_t)(win_w > win_h ? win_h : win_w) : declared_h;
-    if (max_height > 0 && pref_h > max_height) {
+    // The player's resolution limit scales the screen size down, keeping its
+    // shape: a weaker GPU runs a smaller picture, scaled up to fill the screen.
+    // Never a declared size: a cart that draws at its declared size anyway
+    // (pipefitting-bros, 1280x720) came out zoomed and cut off when offered less.
+    uint32_t pref_w = offer_screen_size ? (uint32_t)(win_w > win_h ? win_w : win_h) : 0;
+    uint32_t pref_h = offer_screen_size ? (uint32_t)(win_w > win_h ? win_h : win_w) : 0;
+    if (offer_screen_size && max_height > 0 && pref_h > max_height) {
         pref_w = (uint32_t)((uint64_t)pref_w * max_height / pref_h) & ~1u;
         pref_h = max_height;
-    } else if (!offer_screen_size) {
-        pref_w = pref_h = 0;
     }
-    wc_log("offering %ux%u (limit %u)\n", pref_w, pref_h, max_height);
+    wc_log("offering %ux%u (limit %u, declared %ux%u)\n", pref_w, pref_h, max_height, declared_w, declared_h);
 
     wc_host_options_t opts = {
         .preferred_width = pref_w,
@@ -653,8 +653,11 @@ int main(int argc, char* argv[]) {
     // one taller than it expects.
     uint32_t screen_long = (uint32_t)(win_w > win_h ? win_w : win_h);
     uint32_t screen_short = (uint32_t)(win_w > win_h ? win_h : win_w);
-    uint32_t redir_w = cart_w > screen_long ? cart_w : screen_long;
-    uint32_t redir_h = cart_h > screen_short ? cart_h : screen_short;
+    // A declared size gets a redirect of exactly that size: a cart that sizes
+    // its drawing from the framebuffer (pipefitting-bros) drew a 1920x1080
+    // picture into a 1280x720 cart's redirect, and only its corner showed.
+    uint32_t redir_w = !offer_screen_size ? cart_w : cart_w > screen_long ? cart_w : screen_long;
+    uint32_t redir_h = !offer_screen_size ? cart_h : cart_h > screen_short ? cart_h : screen_short;
     if (is_gl) {
         wc_gl_setup_redirect(redir_w, redir_h);
     } else {
@@ -956,8 +959,8 @@ int main(int argc, char* argv[]) {
             if (ni->width != cart_w || ni->height != cart_h) {
                 cart_w = ni->width;
                 cart_h = ni->height;
-                redir_w = cart_w > screen_long ? cart_w : screen_long;
-                redir_h = cart_h > screen_short ? cart_h : screen_short;
+                redir_w = !offer_screen_size ? cart_w : cart_w > screen_long ? cart_w : screen_long;
+                redir_h = !offer_screen_size ? cart_h : cart_h > screen_short ? cart_h : screen_short;
                 wc_gl_setup_redirect(redir_w, redir_h);
                 wc_log("redirect FBO resized to %ux%u (cart %ux%u)\n",
                        redir_w, redir_h, cart_w, cart_h);

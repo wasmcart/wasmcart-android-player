@@ -70,7 +70,7 @@ public class SettingsActivity extends PadActivity {
                 });
         row(rows, "Set up controller", "Press the bottom face button when asked, so menus and games know where each button is.",
                 null, controllerValue, v -> askBottomButton(this::refresh));
-        row(rows, "Resolution", "The tallest picture a cart draws. Lower runs faster on a weaker device and still fills the screen.",
+        row(rows, "Resolution", "The tallest picture offered to carts that take the screen size. Lower runs faster on a weaker device and still fills the screen. Carts with a fixed size keep it.",
                 null, resolutionValue, v -> {
                     int at = 0;
                     int current = Settings.maxHeight(this);

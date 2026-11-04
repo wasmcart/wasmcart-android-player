@@ -225,6 +225,7 @@ public class LibraryActivity extends PadActivity {
     }
 
     private void rescan(Uri folder) {
+        Log.i(TAG, "scanning " + folder);
         status.setText("Scanning…");
         worker.execute(() -> {
             List<Cart> found = new ArrayList<>();
